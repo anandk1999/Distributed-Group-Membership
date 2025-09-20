@@ -18,7 +18,7 @@ for HOST in $(cat $HOSTS_FILE); do
   echo ">>> Transferring SSH keys to $HOST"
 
   ### If you are setting up for the first time, use the line below to copy over the ssh public key with password auth
-  sshpass -p "your_password" ssh-copy-id -i $SSH_PUBLIC_KEY "$REMOTE_USER@$HOST"
+  sshpass -p "your_password" ssh-copy-id -o "StrictHostKeyChecking=no" -i $SSH_PUBLIC_KEY "$REMOTE_USER@$HOST"
   ### Else, comment command below to copy public key over
   # ssh-copy-id -i $SSH_PUBLIC_KEY "$REMOTE_USER@$HOST"
 
