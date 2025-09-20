@@ -1,0 +1,10 @@
+fa25-cs425-0201.cs.illinois.edu:1
+fa25-cs425-0202.cs.illinois.edu:2
+fa25-cs425-0203.cs.illinois.edu:3
+fa25-cs425-0204.cs.illinois.edu:4
+fa25-cs425-0205.cs.illinois.edu:5
+fa25-cs425-0206.cs.illinois.edu:6
+fa25-cs425-0207.cs.illinois.edu:7
+fa25-cs425-0208.cs.illinois.edu:8
+fa25-cs425-0209.cs.illinois.edu:9
+fa25-cs425-0210.cs.illinois.edu:10
