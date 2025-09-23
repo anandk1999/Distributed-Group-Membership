@@ -48,6 +48,7 @@ func NewNetworkLayer() *NetworkLayer {
 func (n *NetworkLayer) Start(port int) error {
 	addr, err := net.ResolveUDPAddr("udp", ":8080")
 	if err != nil {
+		log.Printf("Error in trying to start in network.go: %v", err)
 		return err
 	}
 	log.Printf(addr.String())
