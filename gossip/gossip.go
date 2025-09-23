@@ -126,10 +126,10 @@ func (g *GossipManager) handleHeartbeat(msg Message, from *net.UDPAddr) {
 func (g *GossipManager) processUpdate(update MemberUpdate) {
 	memberKey := update.NodeID.String()
 
-	// Don't process updates about self
+	// Don't process updates about self, except for suspicion refutation
 	if memberKey == g.membership.LocalNode.String() {
 		if update.Status == Suspected && g.enableSuspicion {
-			// Refute suspicion about self
+			// Refute suspicion about self using suspicion manager
 			g.suspicionMgr.ProcessSuspicion(update.NodeID, update.Incarnation)
 		}
 		return

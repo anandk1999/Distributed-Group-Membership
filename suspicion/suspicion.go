@@ -12,6 +12,7 @@ type SuspicionManager struct {
 	network      *NetworkLayer
 	cleanupTime  time.Duration
 	incarnations map[string]int32
+	stopped      chan bool
 }
 
 func NewSuspicionManager(membership *MembershipList, network *NetworkLayer) *SuspicionManager {
@@ -20,7 +21,16 @@ func NewSuspicionManager(membership *MembershipList, network *NetworkLayer) *Sus
 		network:      network,
 		cleanupTime:  2 * time.Second,
 		incarnations: make(map[string]int32),
+		stopped:      make(chan bool),
 	}
+}
+
+func (s *SuspicionManager) Start() {
+	go s.cleanupLoop()
+}
+
+func (s *SuspicionManager) Stop() {
+	close(s.stopped)
 }
 
 func (s *SuspicionManager) ProcessSuspicion(nodeID NodeID, incarnation int32) {
@@ -37,7 +47,7 @@ func (s *SuspicionManager) ProcessSuspicion(nodeID NodeID, incarnation int32) {
 		// Refute suspicion about self
 		if incarnation >= s.membership.Incarnation {
 			s.membership.Incarnation = incarnation + 1
-			s.broadcastAlive()
+			s.BroadcastAlive()
 		}
 	} else {
 		// Update member status based on incarnation
@@ -49,7 +59,7 @@ func (s *SuspicionManager) ProcessSuspicion(nodeID NodeID, incarnation int32) {
 	}
 }
 
-func (s *SuspicionManager) broadcastAlive() {
+func (s *SuspicionManager) BroadcastAlive() {
 	msg := Message{
 		Type:        AliveMsg,
 		Sender:      s.membership.LocalNode,
@@ -80,18 +90,25 @@ func (s *SuspicionManager) BroadcastSuspicion(member *Member) {
 
 func (s *SuspicionManager) cleanupLoop() {
 	ticker := time.NewTicker(s.cleanupTime)
-	for range ticker.C {
-		s.membership.Lock()
-		now := time.Now()
+	defer ticker.Stop()
 
-		for id, member := range s.membership.Members {
-			if member.Status == Suspected {
-				if now.Sub(member.SuspicionStart) > s.cleanupTime {
-					member.Status = Failed
-					delete(s.membership.Members, id)
+	for {
+		select {
+		case <-s.stopped:
+			return
+		case <-ticker.C:
+			s.membership.Lock()
+			now := time.Now()
+
+			for id, member := range s.membership.Members {
+				if member.Status == Suspected {
+					if now.Sub(member.SuspicionStart) > s.cleanupTime {
+						member.Status = Failed
+						delete(s.membership.Members, id)
+					}
 				}
 			}
+			s.membership.Unlock()
 		}
-		s.membership.Unlock()
 	}
 }

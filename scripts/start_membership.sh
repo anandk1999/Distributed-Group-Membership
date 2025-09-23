@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REMOTE_USER="${REMOTE_USER:-saik2}"
 
 HOSTS_FILE="../hosts.txt"
-PORT=8080
+PORT="8080"
 
 # Read all hosts into an array
 HOSTS=()
@@ -26,18 +26,35 @@ fi
 echo "📋 Found ${#HOSTS[@]} hosts"
 echo "📋 Host list:"
 for i in "${!HOSTS[@]}"; do
-    echo "  [$i] ${HOSTS[$i]}"
+    echo "  [$((i + 1))] ${HOSTS[$i]}"
 done
 
-# Randomly select introducer
-INTRODUCER_INDEX=$((RANDOM % ${#HOSTS[@]}))
-INTRODUCER_HOST="${HOSTS[$INTRODUCER_INDEX]}"
+# Ask user to select introducer
+echo ""
+echo "🎯 Please select which host should be the introducer:"
+while true; do
+    read -p "Enter the number (1-10): " USER_INPUT
+    
+    # Check if input is a valid number between 1 and 10
+    if [[ "$USER_INPUT" =~ ^[0-9]+$ ]] && [ "$USER_INPUT" -ge 1 ] && [ "$USER_INPUT" -le 10 ]; then
+        # Convert to 0-based index and check if it's within the available hosts
+        INTRODUCER_INDEX=$((USER_INPUT - 1))
+        if [ "$INTRODUCER_INDEX" -lt ${#HOSTS[@]} ]; then
+            break
+        else
+            echo "❌ Host number $USER_INPUT is not available. Only ${#HOSTS[@]} hosts found."
+        fi
+    else
+        echo "❌ Invalid input. Please enter a number between 1 and 10"
+    fi
+done
 
-echo "🎯 Selected introducer: $INTRODUCER_HOST"
+INTRODUCER_HOST="${HOSTS[$INTRODUCER_INDEX]}"
+echo "✅ Selected introducer: $INTRODUCER_HOST"
 
 # Get the introducer's IP address for other nodes to connect to
 echo "🔍 Getting introducer IP address..."
-INTRODUCER_IP=$(ssh -T "$REMOTE_USER@$INTRODUCER_HOST" "hostname -I | awk '{print \$1}'" 2>/dev/null)
+INTRODUCER_IP=$(ssh -T "$REMOTE_USER@$INTRODUCER_HOST" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')
 
 if [ -z "$INTRODUCER_IP" ]; then
     echo "❌ Failed to get IP address from introducer host $INTRODUCER_HOST"
@@ -68,8 +85,9 @@ start_introducer() {
 # Function to start normal node
 start_normal_node() {
     local host=$1
-    local introducer_addr="$2:$PORT"
+    local introducer_addr="${INTRODUCER_IP}:${PORT}"
     echo "🔗 Starting normal node on $host (connecting to $introducer_addr)"
+    echo "🔍 Debug - INTRODUCER_IP: '$INTRODUCER_IP', PORT: '$PORT'"
     ssh -T "$REMOTE_USER@$host" "
         if lsof -i UDP:$PORT >/dev/null 2>&1; then
             echo '❌ Port $PORT on $host is in use. Killing existing process...'
@@ -96,7 +114,7 @@ sleep 3
 echo "🌐 Starting normal nodes..."
 for i in "${!HOSTS[@]}"; do
     if [ $i -ne $INTRODUCER_INDEX ]; then
-        start_normal_node "${HOSTS[$i]}" "$INTRODUCER_IP"
+        start_normal_node "${HOSTS[$i]}"
         # Small delay to avoid overwhelming the introducer
         sleep 0.5
     fi

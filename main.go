@@ -53,6 +53,9 @@ func (c *Controller) Start() error {
 		return err
 	}
 
+	// Start suspicion manager
+	c.suspicionMgr.Start()
+
 	// Start based on mode
 	switch c.mode {
 	case GossipMode:
@@ -76,6 +79,7 @@ func (c *Controller) JoinGroup(introducerAddr string) error {
 
 func (c *Controller) Stop() {
 	c.gossipManager.Stop()
+	c.suspicionMgr.Stop()
 	c.network.Stop()
 	log.Println("Controller stopped")
 }
