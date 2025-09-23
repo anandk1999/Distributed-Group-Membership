@@ -12,15 +12,14 @@ import (
 
 // GetLocalIP returns the local IP address of the machine
 func GetLocalIP() string {
-	// conn, err := net.Dial("udp", "8.8.8.8:80")
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer conn.Close()
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
 
-	// localAddr := conn.LocalAddr().(*net.UDPAddr)
-	// return localAddr.IP.String()
-	return "fa25-cs425-0201.cs.illinois.edu"
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
 }
 
 type NetworkLayer struct {
@@ -70,10 +69,12 @@ func (n *NetworkLayer) Start(port int) error {
 
 func (n *NetworkLayer) receiveLoop() {
 	buffer := make([]byte, 65536)
+	log.Printf("UDP receive loop started, listening for incoming messages")
 
 	for {
 		select {
 		case <-n.closed:
+			log.Printf("Receive loop stopping due to closed signal")
 			return
 		default:
 			n.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
@@ -118,12 +119,16 @@ func (n *NetworkLayer) processQueue() {
 		case <-n.closed:
 			return
 		case received := <-n.messageQueue:
+			log.Printf("Processing message type %d from %s", received.Message.Type, received.From)
 			n.mutex.RLock()
 			handler, exists := n.handlers[received.Message.Type]
 			n.mutex.RUnlock()
 
 			if exists {
+				log.Printf("Found handler for message type %d, calling handler", received.Message.Type)
 				handler(received.Message, received.From)
+			} else {
+				log.Printf("No handler registered for message type %d", received.Message.Type)
 			}
 		}
 	}
@@ -131,19 +136,25 @@ func (n *NetworkLayer) processQueue() {
 
 func (n *NetworkLayer) Send(msg Message, target string) error {
 	msg.Timestamp = time.Now().Unix()
-	fmt.Println(target)
+	log.Printf("Sending message type %d to %s", msg.Type, target)
+
 	data, err := json.Marshal(msg)
 	if err != nil {
+		log.Printf("Error marshaling message: %v", err)
 		return err
 	}
 
 	addr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
+		log.Printf("Error resolving address %s: %v", target, err)
 		return err
 	}
 
-	_, err = n.conn.WriteToUDP(data, addr)
-	if err == nil {
+	bytesWritten, err := n.conn.WriteToUDP(data, addr)
+	if err != nil {
+		log.Printf("Error sending UDP message to %s: %v", target, err)
+	} else {
+		log.Printf("Successfully sent %d bytes to %s", bytesWritten, target)
 	}
 	return err
 }
