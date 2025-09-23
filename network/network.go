@@ -39,7 +39,7 @@ type ReceivedMessage struct {
 
 func NewNetworkLayer() *NetworkLayer {
 	return &NetworkLayer{
-		dropRate:     0.5,
+		dropRate:     0.0,
 		messageQueue: make(chan ReceivedMessage, 1000),
 		handlers:     make(map[MessageType]func(Message, *net.UDPAddr)),
 		closed:       make(chan bool),

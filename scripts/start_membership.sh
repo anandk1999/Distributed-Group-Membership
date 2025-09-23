@@ -14,6 +14,7 @@ HOSTS=()
 while IFS= read -r line; do
     if [ -n "$(echo "$line" | tr -d '[:space:]')" ]; then
         HOSTS+=("$line")
+        echo "Debug: Added host: '$line'"
     fi
 done < "$HOSTS_FILE"
 
@@ -23,6 +24,10 @@ if [ ${#HOSTS[@]} -eq 0 ]; then
 fi
 
 echo "📋 Found ${#HOSTS[@]} hosts"
+echo "📋 Host list:"
+for i in "${!HOSTS[@]}"; do
+    echo "  [$i] ${HOSTS[$i]}"
+done
 
 # Randomly select introducer
 INTRODUCER_INDEX=$((RANDOM % ${#HOSTS[@]}))
