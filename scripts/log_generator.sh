@@ -15,7 +15,7 @@ for HOST in $(cat "$HOSTS_FILE"); do
       num="${num%%.*}"              
       num=$((10#$num))              
       echo ">>> Execute log_generator.go on $HOST"
-      ssh -T "$REMOTE_USER@$HOST" "cd mp1-g02 && go run log_generator.go $num"
+      ssh -T "$REMOTE_USER@$HOST" "cd mp2-g02 && go run log_generator.go $num"
     ) &
   fi
 done < "$HOSTS_FILE"

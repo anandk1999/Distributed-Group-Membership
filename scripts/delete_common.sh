@@ -8,7 +8,7 @@ REMOTE_USER="${REMOTE_USER:-saik2}"
 
 HOSTS_FILE="../hosts.txt"
 
-TARGETS=("go" "go.mod" "*.log" "mp1-g02" "setup.log" "setup.sh" "tmp")  # edit as needed
+TARGETS=("go" "go.mod" "*.log" "mp2-g02" "setup.log" "setup.sh" "tmp")  # edit as needed
 
 for HOST in $(cat "$HOSTS_FILE"); do
   (

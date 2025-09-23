@@ -18,7 +18,7 @@ for HOST in $(cat "$HOSTS_FILE"); do
           echo 'Port $PORT on $HOST is in use. Skipping air.'
         else
           echo 'Port $PORT on $HOST is free. Starting air...'
-          cd mp1-g02
+          cd mp2-g02
           nohup air -c .air.toml > air.log 2>&1 < /dev/null &
         fi
         exit

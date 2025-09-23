@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Runs a git (or any) command inside the mp1-g02 repo on each host.
+# Runs a git (or any) command inside the mp2-g02 repo on each host.
 # Example: ./git_command.sh "git status -sb"
 # Load remote username
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +18,7 @@ HOSTS_FILE="../hosts.txt"
 for HOST in $(cat $HOSTS_FILE); do
   (
     echo ">>> Running $USER_CMD in repo on $HOST"
-  ssh "$REMOTE_USER@$HOST" "cd mp1-g02 && $USER_CMD"
+  ssh "$REMOTE_USER@$HOST" "cd mp2-g02 && $USER_CMD"
   ) &
 done
 wait
