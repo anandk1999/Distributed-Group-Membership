@@ -1,104 +1,166 @@
 package network
 
 import (
-	"bufio"
-	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"math/rand"
+	. "mp2-g02/types"
 	"net"
-	"os"
-	"os/signal"
-	"strings"
-	"syscall"
+	"sync"
+	"time"
 )
 
-func send(a string, message string, ctx context.Context) {
-	results := make(chan string)
-
-	go func() {
-		var d net.Dialer
-		conn, err := d.DialContext(ctx, "udp", a)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		_, err = conn.Write([]byte(message))
-		if err != nil {
-			//write something to conn
-			return
-		}
-	}()
-
-	return
-}
-
-// FIGURE OUT HOW TO HANDLE FOR GOSSIP VS. SWIM
-func receive() <-chan "RESULT TYPE" {
-	go func() {
-		addr, err := net.ResolveUDPAddr("udp", ":8080")
-		if err != nil {
-			fmt.Printf("Error resolving UDP address: %v\n", err)
-			return
-		}
-
-		conn, err := net.ListenUDP("udp", addr)
-		if err != nil {
-			fmt.Printf("Error listening on UDP: %v\n", err)
-			return
-		}
-		defer conn.Close()
-
-		fmt.Println("UDP server listening on :8080")
-
-		buffer := make([]byte, 1024)
-		for {
-			n, remoteAddr, err := conn.ReadFromUDP(buffer)
-			if err != nil {
-				fmt.Printf("Error reading from UDP: %v\n", err)
-				continue // Continue listening for the next message
-			}
-
-			message := string(buffer[:n])
-			fmt.Printf("Received %d bytes from %s: %s\n", n, remoteAddr, message)
-
-			// Optionally, send a response back to the client
-			response := []byte("ACK: " + message)
-			_, err = conn.WriteToUDP(response, remoteAddr)
-			if err != nil {
-				fmt.Printf("Error writing to UDP: %v\n", err)
-			}
-		}
-	}()
-
-	return 
-}
-
-func main() {
-	// Read hosts.txt and build address list (host:8080 on each line)
-	file, err := os.Open("../hosts.txt")
+// GetLocalIP returns the local IP address of the machine
+func GetLocalIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open hosts.txt: %v\n", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
-	defer file.Close()
+	defer conn.Close()
 
-	var addresses []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		host := strings.TrimSpace(scanner.Text())
-		if host == "" {
-			continue
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
+}
+
+type NetworkLayer struct {
+	conn         *net.UDPConn
+	dropRate     float32
+	messageQueue chan ReceivedMessage
+	handlers     map[MessageType]func(Message, *net.UDPAddr)
+	closed       chan bool
+	mutex        sync.RWMutex
+}
+
+type ReceivedMessage struct {
+	Message Message
+	From    *net.UDPAddr
+}
+
+func NewNetworkLayer() *NetworkLayer {
+	return &NetworkLayer{
+		dropRate:     0.0,
+		messageQueue: make(chan ReceivedMessage, 1000),
+		handlers:     make(map[MessageType]func(Message, *net.UDPAddr)),
+		closed:       make(chan bool),
+	}
+}
+
+func (n *NetworkLayer) Start(port int) error {
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return err
+	}
+
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return err
+	}
+
+	n.conn = conn
+	n.conn.SetReadBuffer(1048576) // 1MB buffer
+
+	go n.receiveLoop()
+	go n.processQueue()
+
+	return nil
+}
+
+func (n *NetworkLayer) receiveLoop() {
+	buffer := make([]byte, 65536)
+
+	for {
+		select {
+		case <-n.closed:
+			return
+		default:
+			n.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			bytesRead, addr, err := n.conn.ReadFromUDP(buffer)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				if err.Error() != "use of closed network connection" {
+					log.Printf("Error reading UDP: %v", err)
+				}
+				continue
+			}
+
+			// Simulate message drop at receiver
+			n.mutex.RLock()
+			dropRate := n.dropRate
+			n.mutex.RUnlock()
+
+			if rand.Float32() < dropRate {
+				continue
+			}
+
+			var msg Message
+			if err := json.Unmarshal(buffer[:bytesRead], &msg); err != nil {
+				log.Printf("Error unmarshaling message: %v", err)
+				continue
+			}
+
+			select {
+			case n.messageQueue <- ReceivedMessage{Message: msg, From: addr}:
+			default:
+				log.Println("Message queue full, dropping message")
+			}
 		}
-		addresses = append(addresses, host+":8080")
 	}
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read hosts.txt: %v\n", err)
-		os.Exit(1)
+}
+
+func (n *NetworkLayer) processQueue() {
+	for {
+		select {
+		case <-n.closed:
+			return
+		case received := <-n.messageQueue:
+			n.mutex.RLock()
+			handler, exists := n.handlers[received.Message.Type]
+			n.mutex.RUnlock()
+
+			if exists {
+				handler(received.Message, received.From)
+			}
+		}
+	}
+}
+
+func (n *NetworkLayer) Send(msg Message, target string) error {
+	msg.Timestamp = time.Now().Unix()
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	addr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return err
+	}
 
-	send(addresses[0], "", ctx)
-	receive()
+	_, err = n.conn.WriteToUDP(data, addr)
+	if err == nil {
+	}
+	return err
+}
+
+func (n *NetworkLayer) RegisterHandler(msgType MessageType, handler func(Message, *net.UDPAddr)) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	n.handlers[msgType] = handler
+}
+
+func (n *NetworkLayer) SetDropRate(rate float32) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	n.dropRate = rate
+}
+
+func (n *NetworkLayer) Stop() {
+	close(n.closed)
+	if n.conn != nil {
+		n.conn.Close()
+	}
 }
