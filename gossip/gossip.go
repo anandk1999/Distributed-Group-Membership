@@ -236,6 +236,11 @@ func (g *GossipManager) handleJoin(msg Message, from *net.UDPAddr) {
 	memberKey := msg.Sender.String()
 	g.membership.Members[memberKey] = newMember
 
+	// Trigger hooks for new member
+	for _, hook := range g.membership.UpdateHooks {
+		go hook(newMember, Joined)
+	}
+
 	// Send membership list as response
 	members := make([]MemberUpdate, 0, len(g.membership.Members))
 	for _, member := range g.membership.Members {
@@ -281,11 +286,21 @@ func (g *GossipManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
 				LastHeartbeat: time.Now(),
 			}
 			g.membership.Members[memberKey] = newMember
+
+			// Trigger hooks for new member
+			for _, hook := range g.membership.UpdateHooks {
+				go hook(newMember, Joined)
+			}
 		} else if update.Incarnation > member.Incarnation {
 			// Update existing member
 			member.Incarnation = update.Incarnation
 			member.Status = update.Status
 			member.LastHeartbeat = time.Now()
+
+			// Trigger hooks for status change
+			for _, hook := range g.membership.UpdateHooks {
+				go hook(member, StatusChanged)
+			}
 		}
 	}
 
