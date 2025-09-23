@@ -159,6 +159,7 @@ func main() {
 		if err := controller.JoinGroup(*introducerIP); err != nil {
 			log.Printf("Failed to join group: %v", err)
 		}
+		log.Printf("Joined the group")
 	}
 
 	// Start CLI handler in a goroutine

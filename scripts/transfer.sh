@@ -29,7 +29,8 @@ for HOST in $(cat "$HOSTS_FILE"); do
 
       # Check if file already exists on VM
       if ssh "$REMOTE_USER@$HOST" "[ -f $remote_file ]"; then
-        echo ">>> Skipping $HOST: $remote_file already exists"
+        echo ">>> Overwriting file in $HOST: $remote_file already exists"
+        scp "$file" "$REMOTE_USER@$HOST:~/"
       else
         echo ">>> Transferring common file $file to $HOST"
         scp "$file" "$REMOTE_USER@$HOST:~/"

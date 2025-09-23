@@ -9,8 +9,8 @@ REMOTE_USER="${REMOTE_USER:-saik2}"
 HOSTS_FILE="../hosts.txt"
 
 # SSH key to use
-SSH_PUBLIC_KEY="$HOME/.ssh/cs_425_ssh.pub"
-SSH_PRIVATE_KEY="$HOME/.ssh/cs_425_ssh"
+SSH_PUBLIC_KEY="$HOME/.ssh/ssh-login.pub"
+SSH_PRIVATE_KEY="$HOME/.ssh/ssh-login"
 
 # Loop through hosts
 for HOST in $(cat $HOSTS_FILE); do
@@ -18,7 +18,7 @@ for HOST in $(cat $HOSTS_FILE); do
   echo ">>> Transferring SSH keys to $HOST"
 
   ### If you are setting up for the first time, use the line below to copy over the ssh public key with password auth
-  sshpass -p "your_password" ssh-copy-id -o "StrictHostKeyChecking=no" -i $SSH_PUBLIC_KEY "$REMOTE_USER@$HOST"
+  sshpass -p "Anandshiridisai99" ssh-copy-id -o "StrictHostKeyChecking=no" -i $SSH_PUBLIC_KEY "$REMOTE_USER@$HOST"
   ### Else, comment command below to copy public key over
   # ssh-copy-id -i $SSH_PUBLIC_KEY "$REMOTE_USER@$HOST"
 

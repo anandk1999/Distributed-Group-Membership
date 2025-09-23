@@ -21,7 +21,7 @@ CMD="$*"
 for HOST in $(cat "$HOSTS_FILE"); do
   (
     echo ">>> Executing on $HOST: $CMD"
-    ssh "$REMOTE_USER@$HOST" "$CMD"
+    ssh "$REMOTE_USER@$HOST" "cd mp2-g02 && $CMD"
   ) &
 done
 
