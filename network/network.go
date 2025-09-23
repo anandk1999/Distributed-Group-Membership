@@ -70,12 +70,10 @@ func (n *NetworkLayer) Start(port int) error {
 
 func (n *NetworkLayer) receiveLoop() {
 	buffer := make([]byte, 65536)
-	log.Printf("UDP receive loop started, listening for incoming messages")
 
 	for {
 		select {
 		case <-n.closed:
-			log.Printf("Receive loop stopping due to closed signal")
 			return
 		default:
 			n.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
@@ -120,16 +118,12 @@ func (n *NetworkLayer) processQueue() {
 		case <-n.closed:
 			return
 		case received := <-n.messageQueue:
-			log.Printf("Processing message type %d from %s", received.Message.Type, received.From)
 			n.mutex.RLock()
 			handler, exists := n.handlers[received.Message.Type]
 			n.mutex.RUnlock()
 
 			if exists {
-				log.Printf("Found handler for message type %d, calling handler", received.Message.Type)
 				handler(received.Message, received.From)
-			} else {
-				log.Printf("No handler registered for message type %d", received.Message.Type)
 			}
 		}
 	}
@@ -137,7 +131,6 @@ func (n *NetworkLayer) processQueue() {
 
 func (n *NetworkLayer) Send(msg Message, target string) error {
 	msg.Timestamp = time.Now().Unix()
-	log.Printf("Sending message type %d to %s", msg.Type, target)
 
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -151,11 +144,9 @@ func (n *NetworkLayer) Send(msg Message, target string) error {
 		return err
 	}
 
-	bytesWritten, err := n.conn.WriteToUDP(data, addr)
+	_, err = n.conn.WriteToUDP(data, addr)
 	if err != nil {
 		log.Printf("Error sending UDP message to %s: %v", target, err)
-	} else {
-		log.Printf("Successfully sent %d bytes to %s", bytesWritten, target)
 	}
 	return err
 }
