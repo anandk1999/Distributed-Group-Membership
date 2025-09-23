@@ -2,7 +2,6 @@ package network
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"math/rand"
 	. "mp2-g02/types"
@@ -47,10 +46,11 @@ func NewNetworkLayer() *NetworkLayer {
 }
 
 func (n *NetworkLayer) Start(port int) error {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
+	addr, err := net.ResolveUDPAddr("udp", ":8080")
 	if err != nil {
 		return err
 	}
+	log.Printf(addr.String())
 
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
