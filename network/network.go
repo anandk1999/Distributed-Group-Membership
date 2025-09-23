@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	. "mp2-g02/types"
 	"net"
 	"sync"
@@ -38,7 +39,7 @@ type ReceivedMessage struct {
 
 func NewNetworkLayer() *NetworkLayer {
 	return &NetworkLayer{
-		dropRate:     0.0,
+		dropRate:     0.5,
 		messageQueue: make(chan ReceivedMessage, 1000),
 		handlers:     make(map[MessageType]func(Message, *net.UDPAddr)),
 		closed:       make(chan bool),
@@ -90,13 +91,13 @@ func (n *NetworkLayer) receiveLoop() {
 			}
 
 			// Simulate message drop at receiver
-			// `n.mutex.RLock()
-			// dropRate := n.dropRate
-			// n.mutex.RUnlock()
+			n.mutex.RLock()
+			dropRate := n.dropRate
+			n.mutex.RUnlock()
 
-			// if rand.Float32() < dropRate {
-			// 	continue
-			// }`
+			if rand.Float32() < dropRate {
+				continue
+			}
 
 			var msg Message
 			if err := json.Unmarshal(buffer[:bytesRead], &msg); err != nil {
