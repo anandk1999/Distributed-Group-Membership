@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
 	. "mp2-g02/types"
 	"net"
 	"sync"
@@ -20,7 +19,7 @@ func GetLocalIP() string {
 	defer conn.Close()
 
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP.String()
+	return "fa25-cs425-0201.cs.illinois.edu:8080"
 }
 
 type NetworkLayer struct {
@@ -47,12 +46,12 @@ func NewNetworkLayer() *NetworkLayer {
 }
 
 func (n *NetworkLayer) Start(port int) error {
-	addr, err := net.ResolveUDPAddr("udp", ":8080")
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		log.Printf("Error in trying to start in network.go: %v", err)
 		return err
 	}
-	log.Printf(addr.String())
+	log.Printf("Starting UDP server on %s", addr.String())
 
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
@@ -89,13 +88,13 @@ func (n *NetworkLayer) receiveLoop() {
 			}
 
 			// Simulate message drop at receiver
-			n.mutex.RLock()
-			dropRate := n.dropRate
-			n.mutex.RUnlock()
+			// `n.mutex.RLock()
+			// dropRate := n.dropRate
+			// n.mutex.RUnlock()
 
-			if rand.Float32() < dropRate {
-				continue
-			}
+			// if rand.Float32() < dropRate {
+			// 	continue
+			// }`
 
 			var msg Message
 			if err := json.Unmarshal(buffer[:bytesRead], &msg); err != nil {
