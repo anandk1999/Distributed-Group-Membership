@@ -201,11 +201,48 @@ func StartCLI(controller *Controller) {
 
 	for range ticker.C {
 		members := controller.membership.GetAllMembers()
-		log.Printf("Current membership size: %d", len(members))
+		aliveCount := 0
+		suspectedCount := 0
+		failedCount := 0
+
+		log.Printf("=== MEMBERSHIP STATUS ===")
+		log.Printf("Total members: %d", len(members))
+
 		for _, member := range members {
-			log.Printf("  Member: %s, Status: %s, Incarnation: %d",
-				member.ID, member.Status, member.Incarnation)
+			timeSinceHeartbeat := time.Since(member.LastHeartbeat)
+			statusInfo := ""
+
+			switch member.Status {
+			case Alive:
+				aliveCount++
+				if timeSinceHeartbeat > 5*time.Second {
+					statusInfo = fmt.Sprintf(" (⚠️ stale: %v)", timeSinceHeartbeat)
+				}
+			case Suspected:
+				suspectedCount++
+				timeSinceSuspicion := time.Since(member.SuspicionStart)
+				statusInfo = fmt.Sprintf(" (🔍 suspected for: %v)", timeSinceSuspicion)
+			case Failed:
+				failedCount++
+				statusInfo = " (💀 failed)"
+			}
+
+			log.Printf("  %s | %s | Inc:%d | LastHB:%v ago%s",
+				member.ID, member.Status, member.Incarnation,
+				timeSinceHeartbeat.Truncate(time.Millisecond), statusInfo)
 		}
+
+		log.Printf("Summary: %d alive, %d suspected, %d failed", aliveCount, suspectedCount, failedCount)
+
+		// Log recent updates being propagated
+		recentUpdates := controller.membership.GetRecentUpdates(10)
+		if len(recentUpdates) > 0 {
+			log.Printf("Recent updates (piggybacking): %d", len(recentUpdates))
+			for _, update := range recentUpdates {
+				log.Printf("  📤 %s -> %s (Inc:%d)", update.NodeID, update.Status, update.Incarnation)
+			}
+		}
+		log.Printf("========================")
 	}
 }
 

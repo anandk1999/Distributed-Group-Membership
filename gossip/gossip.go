@@ -79,6 +79,14 @@ func (g *GossipManager) heartbeatLoop() {
 				Members:     updates,
 			}
 
+			// Debug: log what we're piggybacking
+			if len(updates) > 0 {
+				log.Printf("📤 Heartbeat piggybacking %d updates to %d targets", len(updates), len(targets))
+				for _, update := range updates {
+					log.Printf("  -> %s: %s (Inc:%d)", update.NodeID, update.Status, update.Incarnation)
+				}
+			}
+
 			for _, target := range targets {
 				if err := g.network.Send(msg, target.ID.Address()); err != nil {
 					log.Printf("Failed to send heartbeat to %s: %v", target.ID, err)
@@ -103,15 +111,30 @@ func (g *GossipManager) handleHeartbeat(msg Message, from *net.UDPAddr) {
 			LastHeartbeat: time.Now(),
 		}
 		g.membership.Members[senderKey] = newMember
+
+		// Add to recent updates for gossip propagation
+		g.membership.AddRecentUpdate(newMember)
+
+		// Trigger join hooks
+		for _, hook := range g.membership.UpdateHooks {
+			go hook(newMember, Joined)
+		}
 	} else {
 		// Update existing member
+		updated := false
 		if msg.Incarnation > sender.Incarnation {
 			sender.Incarnation = msg.Incarnation
 			sender.Status = Alive
 			sender.LastHeartbeat = time.Now()
 			sender.SuspicionStart = time.Time{}
+			updated = true
 		} else if msg.Incarnation == sender.Incarnation {
 			sender.LastHeartbeat = time.Now()
+		}
+
+		// Add to recent updates if we made a significant change
+		if updated {
+			g.membership.AddRecentUpdate(sender)
 		}
 	}
 
@@ -121,6 +144,14 @@ func (g *GossipManager) handleHeartbeat(msg Message, from *net.UDPAddr) {
 		piggybacks = append(piggybacks, update)
 	}
 	g.membership.Unlock()
+
+	// Debug: log received updates
+	if len(piggybacks) > 0 {
+		log.Printf("📥 Received heartbeat from %s with %d piggybacked updates", msg.Sender, len(piggybacks))
+		for _, update := range piggybacks {
+			log.Printf("  <- %s: %s (Inc:%d)", update.NodeID, update.Status, update.Incarnation)
+		}
+	}
 
 	// Process piggybacked updates — reporter is the heartbeat message sender
 	for _, update := range piggybacks {
@@ -148,15 +179,24 @@ func (g *GossipManager) processUpdate(update MemberUpdate, reporter NodeID) {
 	g.membership.Lock()
 	member, exists := g.membership.Members[memberKey]
 
-	if !exists && update.Status == Alive {
-		// New member
+	if !exists {
+		// New member discovered - accept it regardless of status
+		// This prevents missing members when they're first heard about as suspected
 		newMember := &Member{
 			ID:            update.NodeID,
 			Incarnation:   update.Incarnation,
 			Status:        update.Status,
 			LastHeartbeat: time.Now(),
 		}
+
+		// Set suspicion start time if initially suspected
+		if update.Status == Suspected {
+			newMember.SuspicionStart = time.Now()
+		}
+
 		g.membership.Members[memberKey] = newMember
+		g.membership.AddRecentUpdate(newMember)
+
 		// trigger join hooks (do it async)
 		for _, hook := range g.membership.UpdateHooks {
 			go hook(newMember, Joined)
@@ -175,6 +215,9 @@ func (g *GossipManager) processUpdate(update MemberUpdate, reporter NodeID) {
 			} else if update.Status == Suspected && g.enableSuspicion {
 				member.SuspicionStart = time.Now()
 			}
+
+			// Add to recent updates to propagate this change
+			g.membership.AddRecentUpdate(member)
 		}
 	}
 	g.membership.Unlock()
@@ -281,6 +324,7 @@ func (g *GossipManager) handleJoin(msg Message, from *net.UDPAddr) {
 
 	memberKey := msg.Sender.String()
 	g.membership.Members[memberKey] = newMember
+	g.membership.AddRecentUpdate(newMember)
 
 	// Trigger hooks for new member (do asynchronously)
 	for _, hook := range g.membership.UpdateHooks {
@@ -334,7 +378,13 @@ func (g *GossipManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
 				Status:        update.Status,
 				LastHeartbeat: time.Now(),
 			}
+
+			if update.Status == Suspected {
+				newMember.SuspicionStart = time.Now()
+			}
+
 			g.membership.Members[memberKey] = newMember
+			g.membership.AddRecentUpdate(newMember)
 
 			// Trigger hooks for new member
 			for _, hook := range g.membership.UpdateHooks {
@@ -348,6 +398,14 @@ func (g *GossipManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
 			member.Incarnation = update.Incarnation
 			member.Status = update.Status
 			member.LastHeartbeat = time.Now()
+
+			if update.Status == Suspected {
+				member.SuspicionStart = time.Now()
+			} else if update.Status == Alive {
+				member.SuspicionStart = time.Time{}
+			}
+
+			g.membership.AddRecentUpdate(member)
 
 			// Trigger hooks for status change
 			for _, hook := range g.membership.UpdateHooks {

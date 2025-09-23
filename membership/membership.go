@@ -153,7 +153,7 @@ func (ml *MembershipList) GetRecentUpdates(limit int) []MemberUpdate {
 	return filtered[:limit]
 }
 
-func (ml *MembershipList) addRecentUpdate(member *Member) {
+func (ml *MembershipList) AddRecentUpdate(member *Member) {
 	update := MemberUpdate{
 		NodeID:      member.ID,
 		Incarnation: member.Incarnation,
@@ -161,6 +161,11 @@ func (ml *MembershipList) addRecentUpdate(member *Member) {
 		Timestamp:   time.Now(),
 	}
 	ml.recentUpdates = append(ml.recentUpdates, update)
+}
+
+// Deprecated: use AddRecentUpdate instead
+func (ml *MembershipList) addRecentUpdate(member *Member) {
+	ml.AddRecentUpdate(member)
 }
 
 func (ml *MembershipList) GetAllMembers() []*Member {
