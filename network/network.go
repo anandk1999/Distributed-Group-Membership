@@ -2,6 +2,7 @@ package network
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"math/rand"
 	. "mp2-g02/types"
@@ -130,7 +131,7 @@ func (n *NetworkLayer) processQueue() {
 
 func (n *NetworkLayer) Send(msg Message, target string) error {
 	msg.Timestamp = time.Now().Unix()
-
+	fmt.Println(target)
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
