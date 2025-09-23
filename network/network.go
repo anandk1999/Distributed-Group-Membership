@@ -12,14 +12,15 @@ import (
 
 // GetLocalIP returns the local IP address of the machine
 func GetLocalIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
+	// conn, err := net.Dial("udp", "8.8.8.8:80")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// defer conn.Close()
 
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return "fa25-cs425-0201.cs.illinois.edu:8080"
+	// localAddr := conn.LocalAddr().(*net.UDPAddr)
+	// return localAddr.IP.String()
+	return "fa25-cs425-0201.cs.illinois.edu"
 }
 
 type NetworkLayer struct {
