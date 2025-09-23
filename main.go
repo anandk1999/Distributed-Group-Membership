@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -30,8 +31,106 @@ func NewController(config Config) (*Controller, error) {
 	// Create membership list
 	membership := NewMembershipList(config.NodeID)
 
-	// Create suspicion manager
-	suspicionMgr := NewSuspicionManager(membership, network)
+	// Create suspicion manager with options and callbacks
+	opts := Options{
+		SuspicionTimeout:   2 * time.Second,
+		CheckInterval:      200 * time.Millisecond,
+		RequireReports:     1,
+		ConfirmedRetention: 30 * time.Second,
+		OnSuspect: func(target NodeID, inc int32, reporters []NodeID) {
+			// Update local membership to Suspected under lock
+			membership.Lock()
+			if m, ok := membership.Members[target.String()]; ok {
+				m.Status = Suspected
+				m.Incarnation = inc
+				m.SuspicionStart = time.Now()
+			}
+			// collect recipients snapshot
+			recips := make([]NodeID, 0, len(membership.Members))
+			for _, mm := range membership.Members {
+				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
+					continue
+				}
+				recips = append(recips, mm.ID)
+			}
+			membership.Unlock()
+
+			// Build SUSPECT message and send outside any locks
+			msg := Message{
+				Type:        Suspect,
+				Sender:      membership.LocalNode,
+				Target:      target,
+				Incarnation: inc,
+			}
+			for _, r := range recips {
+				network.Send(msg, r.Address())
+			}
+			log.Printf("[OnSuspect] %s inc=%d reporters=%v", target, inc, reporters)
+		},
+		OnConfirm: func(target NodeID, inc int32) {
+			// update local membership
+			membership.Lock()
+			if m, ok := membership.Members[target.String()]; ok {
+				m.Status = Failed
+				m.Incarnation = inc
+			}
+			// collect recipients snapshot
+			recips := make([]NodeID, 0, len(membership.Members))
+			for _, mm := range membership.Members {
+				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
+					continue
+				}
+				recips = append(recips, mm.ID)
+			}
+			membership.Unlock()
+
+			// Build CONFIRM message and broadcast
+			msg := Message{
+				Type:        Confirm,
+				Sender:      membership.LocalNode,
+				Target:      target,
+				Incarnation: inc,
+			}
+			for _, r := range recips {
+				network.Send(msg, r.Address())
+			}
+			log.Printf("[OnConfirm] %s inc=%d", target, inc)
+		},
+		OnClear: func(target NodeID, inc int32) {
+			membership.Lock()
+			if m, ok := membership.Members[target.String()]; ok {
+				m.Status = Alive
+				if inc >= m.Incarnation {
+					m.Incarnation = inc
+				}
+				m.LastHeartbeat = time.Now()
+				m.SuspicionStart = time.Time{}
+			}
+			// collect recipients snapshot
+			recips := make([]NodeID, 0, len(membership.Members))
+			for _, mm := range membership.Members {
+				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
+					continue
+				}
+				recips = append(recips, mm.ID)
+			}
+			membership.Unlock()
+
+			// Optionally broadcast an ALIVE message so others can clear suspicion quickly
+			msg := Message{
+				Type:        AliveMsg,
+				Sender:      membership.LocalNode,
+				Incarnation: inc,
+			}
+			for _, r := range recips {
+				network.Send(msg, r.Address())
+			}
+			log.Printf("[OnClear] %s inc=%d", target, inc)
+		},
+	}
+
+	// We'll set callbacks after creating the manager, but we need the manager instance first.
+	suspicionMgr := NewSuspicionManager(membership, network, opts)
 
 	// Create gossip manager
 	gossipManager := NewGossipManager(membership, network, suspicionMgr)
@@ -53,8 +152,8 @@ func (c *Controller) Start() error {
 		return err
 	}
 
-	// Start suspicion manager
-	c.suspicionMgr.Start()
+	// Start suspicion manager with a background context
+	c.suspicionMgr.Start(context.Background())
 
 	// Start based on mode
 	switch c.mode {
@@ -78,6 +177,7 @@ func (c *Controller) JoinGroup(introducerAddr string) error {
 }
 
 func (c *Controller) Stop() {
+	// Stop managers & network
 	c.gossipManager.Stop()
 	c.suspicionMgr.Stop()
 	c.network.Stop()
@@ -162,8 +262,9 @@ func main() {
 	if !*isIntroducer && *introducerIP != "" {
 		if err := controller.JoinGroup(*introducerIP); err != nil {
 			log.Printf("Failed to join group: %v", err)
+		} else {
+			log.Printf("Joined the group")
 		}
-		log.Printf("Joined the group")
 	}
 
 	// Start CLI handler in a goroutine

@@ -90,8 +90,6 @@ func (g *GossipManager) heartbeatLoop() {
 
 func (g *GossipManager) handleHeartbeat(msg Message, from *net.UDPAddr) {
 	g.membership.Lock()
-	defer g.membership.Unlock()
-
 	// Update sender's heartbeat
 	senderKey := msg.Sender.String()
 	sender, exists := g.membership.Members[senderKey]
@@ -117,24 +115,37 @@ func (g *GossipManager) handleHeartbeat(msg Message, from *net.UDPAddr) {
 		}
 	}
 
-	// Process piggybacked updates
+	// We'll collect piggyback updates to process after unlocking so we can pass the reporter.
+	piggybacks := make([]MemberUpdate, 0, len(msg.Members))
 	for _, update := range msg.Members {
-		g.processUpdate(update)
+		piggybacks = append(piggybacks, update)
+	}
+	g.membership.Unlock()
+
+	// Process piggybacked updates — reporter is the heartbeat message sender
+	for _, update := range piggybacks {
+		g.processUpdate(update, msg.Sender)
 	}
 }
 
-func (g *GossipManager) processUpdate(update MemberUpdate) {
+func (g *GossipManager) processUpdate(update MemberUpdate, reporter NodeID) {
 	memberKey := update.NodeID.String()
 
 	// Don't process updates about self, except for suspicion refutation
 	if memberKey == g.membership.LocalNode.String() {
 		if update.Status == Suspected && g.enableSuspicion {
-			// Refute suspicion about self using suspicion manager
-			g.suspicionMgr.ProcessSuspicion(update.NodeID, update.Incarnation)
+			// Another node suspects us — let suspicion manager handle self-refutation.
+			// Pass the reporter who claimed the suspicion.
+			g.suspicionMgr.ProcessSuspicion(reporter, update.NodeID, update.Incarnation)
+		} else if update.Status == Alive {
+			// if someone reports us Alive with a higher incarnation, accept it
+			g.suspicionMgr.ClearSuspect(update.NodeID, update.Incarnation)
 		}
 		return
 	}
 
+	// Update membership entries — do quick membership updates while holding lock only for the minimal duration
+	g.membership.Lock()
 	member, exists := g.membership.Members[memberKey]
 
 	if !exists && update.Status == Alive {
@@ -146,6 +157,12 @@ func (g *GossipManager) processUpdate(update MemberUpdate) {
 			LastHeartbeat: time.Now(),
 		}
 		g.membership.Members[memberKey] = newMember
+		// trigger join hooks (do it async)
+		for _, hook := range g.membership.UpdateHooks {
+			go hook(newMember, Joined)
+		}
+		g.membership.Unlock()
+		return
 	} else if exists {
 		// Update existing member based on incarnation
 		if update.Incarnation > member.Incarnation {
@@ -159,6 +176,16 @@ func (g *GossipManager) processUpdate(update MemberUpdate) {
 				member.SuspicionStart = time.Now()
 			}
 		}
+	}
+	g.membership.Unlock()
+
+	// If the piggyback is a Suspect message, report that suspicion to the suspicion manager
+	if update.Status == Suspected && g.enableSuspicion {
+		g.suspicionMgr.ProcessSuspicion(reporter, update.NodeID, update.Incarnation)
+	}
+	// If piggyback says Alive, clear any tracked suspicion
+	if update.Status == Alive {
+		g.suspicionMgr.ClearSuspect(update.NodeID, update.Incarnation)
 	}
 }
 
@@ -177,12 +204,17 @@ func (g *GossipManager) failureDetectionLoop() {
 }
 
 func (g *GossipManager) checkFailures() {
-	g.membership.Lock()
-	defer g.membership.Unlock()
-
+	// We'll collect suspects to report after unlocking, and members to remove to notify hooks.
 	now := time.Now()
-	toRemove := []string{}
+	type suspectInfo struct {
+		id   string
+		node NodeID
+		inc  int32
+	}
+	var suspects []suspectInfo
+	var toRemove [](*Member)
 
+	g.membership.Lock()
 	for id, member := range g.membership.Members {
 		// Skip self
 		if id == g.membership.LocalNode.String() {
@@ -193,37 +225,51 @@ func (g *GossipManager) checkFailures() {
 		case Alive:
 			if now.Sub(member.LastHeartbeat) > g.suspicionTime {
 				if g.enableSuspicion {
+					// mark suspected locally and start suspicion tracking
 					member.Status = Suspected
 					member.SuspicionStart = now
-					// Broadcast suspicion
-					g.suspicionMgr.BroadcastSuspicion(member)
+					suspects = append(suspects, suspectInfo{id: id, node: member.ID, inc: member.Incarnation})
 				} else {
-					// Direct failure without suspicion
-					toRemove = append(toRemove, id)
+					// direct failure without suspicion: schedule removal
+					toRemove = append(toRemove, cloneMember(member))
+					delete(g.membership.Members, id)
 				}
 			}
 		case Suspected:
 			if now.Sub(member.SuspicionStart) > g.failureTime {
-				toRemove = append(toRemove, id)
+				// finalize failure: remove and schedule hooks
+				toRemove = append(toRemove, cloneMember(member))
+				delete(g.membership.Members, id)
 			}
 		}
 	}
+	g.membership.Unlock()
 
-	// Remove failed members
-	for _, id := range toRemove {
-		member := g.membership.Members[id]
-		delete(g.membership.Members, id)
+	// Report collected suspects to suspicion manager (we are the reporter)
+	for _, s := range suspects {
+		// Our local node is the reporter
+		g.suspicionMgr.ProcessSuspicion(g.membership.LocalNode, s.node, s.inc)
+	}
 
-		// Notify hooks
+	// Notify hooks for removed members (do this outside membership lock)
+	for _, m := range toRemove {
 		for _, hook := range g.membership.UpdateHooks {
-			go hook(member, FailureDetected)
+			go hook(m, FailureDetected)
 		}
 	}
 }
 
+// cloneMember makes a shallow copy so we can safely hand objects to hooks after deletion.
+func cloneMember(m *Member) *Member {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	return &c
+}
+
 func (g *GossipManager) handleJoin(msg Message, from *net.UDPAddr) {
 	g.membership.Lock()
-	defer g.membership.Unlock()
 
 	// Add new member to membership list
 	newMember := &Member{
@@ -236,12 +282,12 @@ func (g *GossipManager) handleJoin(msg Message, from *net.UDPAddr) {
 	memberKey := msg.Sender.String()
 	g.membership.Members[memberKey] = newMember
 
-	// Trigger hooks for new member
+	// Trigger hooks for new member (do asynchronously)
 	for _, hook := range g.membership.UpdateHooks {
 		go hook(newMember, Joined)
 	}
 
-	// Send membership list as response
+	// Build membership list for response
 	members := make([]MemberUpdate, 0, len(g.membership.Members))
 	for _, member := range g.membership.Members {
 		members = append(members, MemberUpdate{
@@ -251,6 +297,7 @@ func (g *GossipManager) handleJoin(msg Message, from *net.UDPAddr) {
 			Timestamp:   time.Now(),
 		})
 	}
+	g.membership.Unlock()
 
 	response := Message{
 		Type:        JoinResponse,
@@ -259,14 +306,16 @@ func (g *GossipManager) handleJoin(msg Message, from *net.UDPAddr) {
 		Members:     members,
 	}
 
+	// send response outside locks
 	g.network.Send(response, msg.Sender.Address())
 	log.Printf("New member joined: %s", msg.Sender)
 }
 
 func (g *GossipManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
-	g.membership.Lock()
-	defer g.membership.Unlock()
+	// We'll collect clears for any Alive updates and apply them after updating membership.
+	clears := []MemberUpdate{}
 
+	g.membership.Lock()
 	// Process all members from the response
 	for _, update := range msg.Members {
 		memberKey := update.NodeID.String()
@@ -291,6 +340,9 @@ func (g *GossipManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
 			for _, hook := range g.membership.UpdateHooks {
 				go hook(newMember, Joined)
 			}
+			if update.Status == Alive {
+				clears = append(clears, update)
+			}
 		} else if update.Incarnation > member.Incarnation {
 			// Update existing member
 			member.Incarnation = update.Incarnation
@@ -301,7 +353,16 @@ func (g *GossipManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
 			for _, hook := range g.membership.UpdateHooks {
 				go hook(member, StatusChanged)
 			}
+			if update.Status == Alive {
+				clears = append(clears, update)
+			}
 		}
+	}
+	g.membership.Unlock()
+
+	// Clear any tracked suspicions that are refuted by Alive reports
+	for _, u := range clears {
+		g.suspicionMgr.ClearSuspect(u.NodeID, u.Incarnation)
 	}
 
 	log.Printf("Received membership list from %s, now have %d members", msg.Sender, len(g.membership.Members))
@@ -323,43 +384,32 @@ func (g *GossipManager) JoinGroup(introducerAddr string) error {
 }
 
 func (g *GossipManager) handleAliveMessage(msg Message, from *net.UDPAddr) {
+	// Update membership and then clear any tracked suspicion outside the lock.
 	g.membership.Lock()
-	defer g.membership.Unlock()
-
 	memberKey := msg.Sender.String()
 	member, exists := g.membership.Members[memberKey]
 
-	if exists && msg.Incarnation > member.Incarnation {
+	if exists && msg.Incarnation >= member.Incarnation {
 		member.Incarnation = msg.Incarnation
 		member.Status = Alive
 		member.LastHeartbeat = time.Now()
 		member.SuspicionStart = time.Time{}
+	}
+	g.membership.Unlock()
+
+	// Clear tracked suspicion (if any) outside membership lock
+	g.suspicionMgr.ClearSuspect(msg.Sender, msg.Incarnation)
+	if exists {
 		log.Printf("Member %s refuted suspicion with incarnation %d", msg.Sender, msg.Incarnation)
 	}
 }
 
 func (g *GossipManager) handleSuspectMessage(msg Message, from *net.UDPAddr) {
-	g.membership.Lock()
-	defer g.membership.Unlock()
-
-	targetKey := msg.Target.String()
-
-	// Don't process suspicion about self
-	if targetKey == g.membership.LocalNode.String() {
-		// Counter suspicion about self
-		if g.enableSuspicion {
-			g.suspicionMgr.ProcessSuspicion(msg.Target, msg.Incarnation)
-		}
+	// When we receive an explicit Suspect message from some peer,
+	// pass it to the suspicion manager with the sender as the reporter.
+	// The suspicion manager's OnSuspect callback will update membership state (via callback).
+	if !g.enableSuspicion {
 		return
 	}
-
-	member, exists := g.membership.Members[targetKey]
-	if exists && msg.Incarnation >= member.Incarnation {
-		if member.Status == Alive {
-			member.Status = Suspected
-			member.Incarnation = msg.Incarnation
-			member.SuspicionStart = time.Now()
-			log.Printf("Member %s suspected with incarnation %d", msg.Target, msg.Incarnation)
-		}
-	}
+	g.suspicionMgr.ProcessSuspicion(msg.Sender, msg.Target, msg.Incarnation)
 }
