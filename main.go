@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 
-	// . "mp2-g02/gossip"
 	. "mp2-g02/membership"
 	. "mp2-g02/network"
 	. "mp2-g02/pingack"
