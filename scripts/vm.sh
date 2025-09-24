@@ -21,5 +21,5 @@ fi
 MACH_NUM=$(printf "%02d" $1)   # zero-pad to 2 digits if needed
 HOST="fa25-cs425-02${MACH_NUM}.cs.illinois.edu"
 
-ssh -T -o StrictHostKeyChecking=no "$REMOTE_USER@$HOST" "cd mp2-g02 && go build -o mp2-node && ./mp2-node -port 8080 -introducer $2 -mode gossip"
+ssh -T -o StrictHostKeyChecking=no "$REMOTE_USER@$HOST" "cd mp2-g02 && go build -o mp2-node && ./mp2-node -port 8080 -introducer $2 -mode pingack"
 
