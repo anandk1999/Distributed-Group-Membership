@@ -26,8 +26,8 @@ func NewGossipManager(ml *MembershipList, net *NetworkLayer, suspicionMgr *Suspi
 	return &GossipManager{
 		membership:      ml,
 		network:         net,
-		heartbeatRate:   50 * time.Millisecond,
-		fanout:          3,
+		heartbeatRate:   5 * time.Millisecond,
+		fanout:          2,
 		suspicionTime:   2 * time.Second,
 		failureTime:     1 * time.Second,
 		stopped:         make(chan bool),
