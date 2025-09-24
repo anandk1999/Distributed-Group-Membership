@@ -78,6 +78,10 @@ func (p *PingAckManager) Start() {
 
 }
 
+func (p *PingAckManager) Stop() {
+	close(p.stopped)
+}
+
 func (p *PingAckManager) SetSuspicion(enable bool) {
 	p.enableSuspicion = enable
 }
@@ -204,7 +208,7 @@ func (p *PingAckManager) declareFailure(nodeID NodeID) {
 		p.membership.AddRecentUpdate(member)
 		delete(p.membership.Members, memberKey)
 
-		log.Printf("💀 Declared %s as FAILED", nodeID)
+		log.Printf("Declared %s as FAILED", nodeID)
 
 		// Trigger failure hooks
 		for _, hook := range p.membership.UpdateHooks {

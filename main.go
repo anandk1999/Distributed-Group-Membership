@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	. "mp2-g02/gossip"
+
+	// . "mp2-g02/gossip"
 	. "mp2-g02/membership"
 	. "mp2-g02/network"
+	. "mp2-g02/pingack"
 	. "mp2-g02/suspicion"
 	. "mp2-g02/types"
 	"os"
@@ -17,11 +19,12 @@ import (
 )
 
 type Controller struct {
-	mode          DetectionMode
-	gossipManager *GossipManager
-	membership    *MembershipList
-	network       *NetworkLayer
-	suspicionMgr  *SuspicionManager
+	mode DetectionMode
+	// gossipManager  *GossipManager
+	pingAckManager *PingAckManager
+	membership     *MembershipList
+	network        *NetworkLayer
+	suspicionMgr   *SuspicionManager
 }
 
 func NewController(config Config) (*Controller, error) {
@@ -133,14 +136,16 @@ func NewController(config Config) (*Controller, error) {
 	suspicionMgr := NewSuspicionManager(membership, network, opts)
 
 	// Create gossip manager
-	gossipManager := NewGossipManager(membership, network, suspicionMgr)
+	// gossipManager := NewGossipManager(membership, network, suspicionMgr)
+	pingAckManager := NewPingAckManager(membership, network, suspicionMgr)
 
 	controller := &Controller{
-		mode:          config.Mode,
-		gossipManager: gossipManager,
-		membership:    membership,
-		network:       network,
-		suspicionMgr:  suspicionMgr,
+		mode: config.Mode,
+		// gossipManager: gossipManager,
+		pingAckManager: pingAckManager,
+		membership:     membership,
+		network:        network,
+		suspicionMgr:   suspicionMgr,
 	}
 
 	return controller, nil
@@ -158,10 +163,9 @@ func (c *Controller) Start() error {
 	// Start based on mode
 	switch c.mode {
 	case GossipMode:
-		c.gossipManager.Start()
+		// c.gossipManager.Start()
 	case PingAckMode:
-		// TODO: Implement ping-ack mode
-		log.Println("Ping-Ack mode not yet implemented")
+		c.pingAckManager.Start()
 	}
 
 	log.Printf("Controller started in %v mode", c.mode)
@@ -170,15 +174,23 @@ func (c *Controller) Start() error {
 
 // JoinGroup joins the distributed group via introducer
 func (c *Controller) JoinGroup(introducerAddr string) error {
-	if c.mode == GossipMode {
-		return c.gossipManager.JoinGroup(introducerAddr)
+	switch c.mode {
+	case GossipMode:
+		// return c.gossipManager.JoinGroup(introducerAddr)
+	case PingAckMode:
+		return c.pingAckManager.JoinGroup(introducerAddr)
 	}
 	return nil
 }
 
 func (c *Controller) Stop() {
 	// Stop managers & network
-	c.gossipManager.Stop()
+	switch c.mode {
+	case GossipMode:
+		// c.gossipManager.Stop()
+	case PingAckMode:
+		c.pingAckManager.Stop()
+	}
 	c.suspicionMgr.Stop()
 	c.network.Stop()
 	log.Println("Controller stopped")
@@ -239,7 +251,7 @@ func StartCLI(controller *Controller) {
 		if len(recentUpdates) > 0 {
 			log.Printf("Recent updates (piggybacking): %d", len(recentUpdates))
 			for _, update := range recentUpdates {
-				log.Printf("  📤 %s -> %s (Inc:%d)", update.NodeID, update.Status, update.Incarnation)
+				log.Printf("%s -> %s (Inc:%d)", update.NodeID, update.Status, update.Incarnation)
 			}
 		}
 		log.Printf("========================")
@@ -251,11 +263,11 @@ func (c *Controller) SwitchMode(mode DetectionMode) {
 
 	switch mode {
 	case GossipMode:
-		// c.pingAckManager.Stop()
-		c.gossipManager.Start()
+		c.pingAckManager.Stop()
+		// c.gossipManager.Start()
 	case PingAckMode:
-		c.gossipManager.Stop()
-		// c.pingAckManager.Start()
+		// c.gossipManager.Stop()
+		c.pingAckManager.Start()
 	}
 }
 
