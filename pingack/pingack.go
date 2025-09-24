@@ -45,11 +45,11 @@ func NewPingAckManager(ml *MembershipList, net *NetworkLayer, suspicionMgr *Susp
 	return &PingAckManager{
 		membership:     ml,
 		network:        net,
-		protocolPeriod: 2 * time.Second,
-		ackTimeout:     1 * time.Second,
-		k:              1,
-		suspicionTime:  2 * time.Second,
-		failureTime:    1 * time.Second,
+		protocolPeriod: 5 * time.Second,
+		ackTimeout:     1500 * time.Millisecond,
+		k:              3,
+		suspicionTime:  8 * time.Second,
+		failureTime:    10 * time.Second,
 		stopped:        make(chan bool),
 		suspicionMgr:   suspicionMgr,
 		seqNum:         0,
@@ -66,8 +66,8 @@ func (p *PingAckManager) Start() {
 	// Register handlers
 	p.network.RegisterHandler(Ping, p.handlePing)
 	p.network.RegisterHandler(Ack, p.handleAck)
-	p.network.RegisterHandler(IndirectPing, p.handleIndirectPing) // ping-req handler
-	p.network.RegisterHandler(IndirectAck, p.handleIndirectAck)   // indirect ack handler
+	p.network.RegisterHandler(IndirectPing, p.handleIndirectPing)
+	p.network.RegisterHandler(IndirectAck, p.handleIndirectAck)
 	p.network.RegisterHandler(Join, p.handleJoin)
 	p.network.RegisterHandler(JoinResponse, p.handleJoinResponse)
 	p.network.RegisterHandler(AliveMsg, p.handleAliveMessage)
@@ -150,7 +150,9 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 	select {
 	case <-pending.ackReceived:
 		// log.Printf("Direct ACK received from %s (seq %d)", target.ID, seqNum)
+		p.mu.Lock()
 		delete(p.pendingAcks, seqNum)
+		p.mu.Unlock()
 		return
 
 	case <-directAckTimer.C:
@@ -164,7 +166,9 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 
 	if len(indirectMembers) == 0 {
 		log.Printf("No members available for indirect probing of %s", target.ID)
+		p.mu.Lock()
 		delete(p.pendingAcks, seqNum)
+		p.mu.Unlock()
 		p.declareFailure(target.ID)
 		return
 	}
@@ -196,7 +200,9 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 	select {
 	case <-pending.ackReceived:
 		// log.Printf("Indirect ACK received for %s (seq %d)", target.ID, seqNum)
+		p.mu.Lock()
 		delete(p.pendingAcks, seqNum)
+		p.mu.Unlock()
 		return
 
 	case <-indirectAckTimer.C:
@@ -296,19 +302,27 @@ func (p *PingAckManager) processUpdate(update MemberUpdate, reporter NodeID) {
 		p.membership.Unlock()
 		return
 	} else if exists {
-		// Update existing member based on incarnation
-		if update.Incarnation > member.Incarnation {
+		// if update is Alive and incarnation is >= current -> refresh heartbeat
+		if update.Status == Alive && update.Incarnation >= member.Incarnation {
+			if update.Incarnation > member.Incarnation {
+				member.Incarnation = update.Incarnation
+			}
+			if member.Status != Alive {
+				member.Status = Alive
+				member.SuspicionStart = time.Time{}
+			}
+			member.LastHeartbeat = time.Now()
+			p.membership.AddRecentUpdate(member)
+		} else if update.Incarnation > member.Incarnation {
+			// existing behaviour for strictly higher incarnation
 			member.Incarnation = update.Incarnation
 			member.Status = update.Status
-
 			if update.Status == Alive {
 				member.LastHeartbeat = time.Now()
 				member.SuspicionStart = time.Time{}
 			} else if update.Status == Suspected && p.enableSuspicion {
 				member.SuspicionStart = time.Now()
 			}
-
-			// Add to recent updates to propagate this change
 			p.membership.AddRecentUpdate(member)
 		}
 	}
