@@ -46,7 +46,7 @@ func (ml *MembershipList) AddMember(member *Member) {
 	existing, exists := ml.Members[member.ID.String()]
 	if !exists || member.Incarnation > existing.Incarnation {
 		ml.Members[member.ID.String()] = member
-		ml.addRecentUpdate(member)
+		ml.AddRecentUpdate(member)
 
 		// Trigger hooks
 		for _, hook := range ml.UpdateHooks {
@@ -71,7 +71,7 @@ func (ml *MembershipList) UpdateMember(nodeID string, status MemberStatus, incar
 				member.SuspicionStart = time.Now()
 			}
 
-			ml.addRecentUpdate(member)
+			ml.AddRecentUpdate(member)
 
 			// Trigger hooks
 			for _, hook := range ml.UpdateHooks {
@@ -87,7 +87,7 @@ func (ml *MembershipList) RemoveMember(nodeID string) {
 
 	if member, exists := ml.Members[nodeID]; exists {
 		member.Status = Failed
-		ml.addRecentUpdate(member)
+		ml.AddRecentUpdate(member)
 		delete(ml.Members, nodeID)
 
 		// Trigger hooks
@@ -161,11 +161,6 @@ func (ml *MembershipList) AddRecentUpdate(member *Member) {
 		Timestamp:   time.Now(),
 	}
 	ml.recentUpdates = append(ml.recentUpdates, update)
-}
-
-// Deprecated: use AddRecentUpdate instead
-func (ml *MembershipList) addRecentUpdate(member *Member) {
-	ml.AddRecentUpdate(member)
 }
 
 func (ml *MembershipList) GetAllMembers() []*Member {
