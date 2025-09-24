@@ -8,6 +8,7 @@ import (
 	. "mp2-g02/suspicion"
 	. "mp2-g02/types"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -37,6 +38,7 @@ type PingAckManager struct {
 		ch        chan bool
 	}
 	enableSuspicion bool
+	mu              sync.Mutex
 }
 
 func NewPingAckManager(ml *MembershipList, net *NetworkLayer, suspicionMgr *SuspicionManager) *PingAckManager {
@@ -107,8 +109,10 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 	}
 
 	target := targets[0]
+	p.mu.Lock()
 	p.seqNum++
 	seqNum := p.seqNum
+	p.mu.Unlock()
 
 	log.Printf("SWIM Protocol Period %d: Pinging %s", seqNum, target.ID)
 
@@ -132,7 +136,9 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 		ackReceived:  make(chan bool, 1),
 	}
 
+	p.mu.Lock()
 	p.pendingAcks[seqNum] = pending
+	p.mu.Unlock()
 
 	if err := p.network.Send(pingMsg, target.ID.Address()); err != nil {
 		log.Printf("Failed to send direct ping to %s: %v", target.ID, err)
@@ -181,6 +187,9 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 	}
 
 	remainingTimeout := p.protocolPeriod - p.ackTimeout - 100*time.Millisecond
+	if remainingTimeout < 50*time.Millisecond {
+		remainingTimeout = 50 * time.Millisecond
+	}
 	indirectAckTimer := time.NewTimer(remainingTimeout)
 	defer indirectAckTimer.Stop()
 
@@ -192,25 +201,50 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 
 	case <-indirectAckTimer.C:
 		// log.Printf("No ACKs received for %s (seq %d), declaring failure", target.ID, seqNum)
+		p.mu.Lock()
 		delete(p.pendingAcks, seqNum)
+		p.mu.Unlock()
 		p.declareFailure(target.ID)
 	}
 }
 
 // declareFailure marks a member as failed and removes from membership
 func (p *PingAckManager) declareFailure(nodeID NodeID) {
+	// In SWIM, lack of ACKs should first mark Suspected; final removal happens after a timeout.
+	if p.enableSuspicion {
+		p.membership.Lock()
+		memberKey := nodeID.String()
+		member, exists := p.membership.Members[memberKey]
+		if !exists {
+			// Create an entry as suspected so the rest of the system can converge
+			member = &Member{ID: nodeID, Status: Suspected, LastHeartbeat: time.Now(), SuspicionStart: time.Now()}
+			p.membership.Members[memberKey] = member
+			p.membership.AddRecentUpdate(member)
+		} else {
+			// Transition to suspected if not already
+			if member.Status != Suspected {
+				member.Status = Suspected
+				member.SuspicionStart = time.Now()
+				p.membership.AddRecentUpdate(member)
+			}
+		}
+		p.membership.Unlock()
+
+		// Report our suspicion
+		p.suspicionMgr.ProcessSuspicion(p.membership.LocalNode, nodeID, member.Incarnation)
+		log.Printf("Declared %s as SUSPECTED (no ACKs)", nodeID)
+		return
+	}
+
+	// If suspicion is disabled, we remove immediately (legacy behavior)
 	p.membership.Lock()
 	defer p.membership.Unlock()
-
 	memberKey := nodeID.String()
 	if member, exists := p.membership.Members[memberKey]; exists {
 		member.Status = Failed
 		p.membership.AddRecentUpdate(member)
 		delete(p.membership.Members, memberKey)
-
 		log.Printf("Declared %s as FAILED", nodeID)
-
-		// Trigger failure hooks
 		for _, hook := range p.membership.UpdateHooks {
 			go hook(member, FailureDetected)
 		}
@@ -496,6 +530,7 @@ func (p *PingAckManager) handleAck(msg Message, from *net.UDPAddr) {
 	p.suspicionMgr.ClearSuspect(msg.Sender, msg.Incarnation)
 
 	// 2) If this ACK corresponds to our own outstanding direct ping, signal it
+	p.mu.Lock()
 	if pending, ok := p.pendingAcks[msg.SeqNum]; ok && pending.target.Equals(msg.Sender) {
 		pending.directAck = true
 		select {
@@ -503,10 +538,14 @@ func (p *PingAckManager) handleAck(msg Message, from *net.UDPAddr) {
 		default:
 		}
 	}
+	p.mu.Unlock()
 
 	// 3) If this ACK completes an indirect probe we are relaying, notify waiter
 	indKey := fmt.Sprintf("%d|%s", msg.SeqNum, msg.Sender.String())
-	if waiter, ok := p.pendingIndirect[indKey]; ok {
+	p.mu.Lock()
+	waiter, ok := p.pendingIndirect[indKey]
+	p.mu.Unlock()
+	if ok {
 		select {
 		case waiter.ch <- true:
 		default:
@@ -518,13 +557,47 @@ func (p *PingAckManager) handleAck(msg Message, from *net.UDPAddr) {
 func (p *PingAckManager) handleIndirectPing(msg Message, from *net.UDPAddr) {
 	log.Printf("Received ping-req from %s for target %s (seq %d)", msg.Sender, msg.Target, msg.SeqNum)
 
+	// Treat the requester as alive (we just heard from it)
+	p.membership.Lock()
+	reqKey := msg.Sender.String()
+	if m, ok := p.membership.Members[reqKey]; ok {
+		if msg.Incarnation > m.Incarnation {
+			m.Incarnation = msg.Incarnation
+			m.Status = Alive
+			m.SuspicionStart = time.Time{}
+			m.LastHeartbeat = time.Now()
+			p.membership.AddRecentUpdate(m)
+		} else if msg.Incarnation == m.Incarnation {
+			m.LastHeartbeat = time.Now()
+		}
+	} else {
+		newM := &Member{ID: msg.Sender, Incarnation: msg.Incarnation, Status: Alive, LastHeartbeat: time.Now()}
+		p.membership.Members[reqKey] = newM
+		p.membership.AddRecentUpdate(newM)
+		for _, hook := range p.membership.UpdateHooks {
+			go hook(newM, Joined)
+		}
+	}
+
+	// Capture piggyback updates from requester
+	piggybacks := make([]MemberUpdate, 0, len(msg.Members))
+	piggybacks = append(piggybacks, msg.Members...)
+	p.membership.Unlock()
+
 	// Register a short-lived waiter so when we get ACK from target we can forward IndirectAck to requester
 	key := fmt.Sprintf("%d|%s", msg.SeqNum, msg.Target.String())
 	w := &struct {
 		requester NodeID
 		ch        chan bool
 	}{requester: msg.Sender, ch: make(chan bool, 1)}
+	p.mu.Lock()
 	p.pendingIndirect[key] = w
+	p.mu.Unlock()
+
+	// Process piggybacked updates with reporter=msg.Sender
+	for _, u := range piggybacks {
+		p.processUpdate(u, msg.Sender)
+	}
 
 	// Send a direct PING to the target with the same seq number and piggyback recent updates
 	updates := p.membership.GetRecentUpdates(5)
@@ -547,7 +620,11 @@ func (p *PingAckManager) handleIndirectPing(msg Message, from *net.UDPAddr) {
 	}) {
 		t := time.NewTimer(p.ackTimeout)
 		defer t.Stop()
-		defer delete(p.pendingIndirect, waitKey)
+		defer func() {
+			p.mu.Lock()
+			delete(p.pendingIndirect, waitKey)
+			p.mu.Unlock()
+		}()
 		select {
 		case <-waiter.ch:
 			indAck := Message{
@@ -574,12 +651,37 @@ func (p *PingAckManager) handleIndirectAck(msg Message, from *net.UDPAddr) {
 	log.Printf("Received indirect ACK from %s for target %s (seq %d)", msg.Sender, msg.Target, msg.SeqNum)
 
 	// Satisfy any pending probe for this seq/target
+	p.mu.Lock()
 	if pending, ok := p.pendingAcks[msg.SeqNum]; ok && pending.target.Equals(msg.Target) {
 		pending.indirectAcks[msg.Sender.String()] = true
 		select {
 		case pending.ackReceived <- true:
 		default:
 		}
+	}
+	p.mu.Unlock()
+
+	// Refresh membership for the target (we learned it is alive via proxy)
+	p.membership.Lock()
+	targetKey := msg.Target.String()
+	if m, ok := p.membership.Members[targetKey]; ok {
+		// We don't know the target's new incarnation from IndirectAck; keep as-is but refresh liveness
+		m.Status = Alive
+		m.LastHeartbeat = time.Now()
+		m.SuspicionStart = time.Time{}
+		// no AddRecentUpdate unless status actually changed
+	}
+	// capture current inc for clearing suspicion
+	inc := int32(0)
+	if m, ok := p.membership.Members[targetKey]; ok {
+		inc = m.Incarnation
+	}
+	p.membership.Unlock()
+	if inc > 0 {
+		p.suspicionMgr.ClearSuspect(msg.Target, inc)
+	} else {
+		// Best-effort clear even if we don't know inc
+		p.suspicionMgr.ClearSuspect(msg.Target, 0)
 	}
 }
 
