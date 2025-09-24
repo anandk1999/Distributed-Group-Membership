@@ -35,7 +35,7 @@ type PingAckManager struct {
 	pendingAcks     map[uint64]*pendingPing
 	pendingIndirect map[string]*struct {
 		requester NodeID
-		ch        chan bool
+		ch        chan int32
 	}
 	enableSuspicion bool
 	mu              sync.Mutex
@@ -56,7 +56,7 @@ func NewPingAckManager(ml *MembershipList, net *NetworkLayer, suspicionMgr *Susp
 		pendingAcks:    make(map[uint64]*pendingPing),
 		pendingIndirect: make(map[string]*struct {
 			requester NodeID
-			ch        chan bool
+			ch        chan int32
 		}),
 		enableSuspicion: true,
 	}
@@ -77,7 +77,6 @@ func (p *PingAckManager) Start() {
 	go p.failureDetectionLoop()
 
 	log.Println("PingAck manager started")
-
 }
 
 func (p *PingAckManager) Stop() {
@@ -169,7 +168,7 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 		p.mu.Lock()
 		delete(p.pendingAcks, seqNum)
 		p.mu.Unlock()
-		p.declareFailure(target.ID)
+		p.declareSuspicion(target.ID)
 		return
 	}
 
@@ -199,24 +198,21 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 
 	select {
 	case <-pending.ackReceived:
-		// log.Printf("Indirect ACK received for %s (seq %d)", target.ID, seqNum)
 		p.mu.Lock()
 		delete(p.pendingAcks, seqNum)
 		p.mu.Unlock()
 		return
 
 	case <-indirectAckTimer.C:
-		// log.Printf("No ACKs received for %s (seq %d), declaring failure", target.ID, seqNum)
 		p.mu.Lock()
 		delete(p.pendingAcks, seqNum)
 		p.mu.Unlock()
-		p.declareFailure(target.ID)
+		p.declareSuspicion(target.ID)
 	}
 }
 
-// declareFailure marks a member as failed and removes from membership
-func (p *PingAckManager) declareFailure(nodeID NodeID) {
-	// In SWIM, lack of ACKs should first mark Suspected; final removal happens after a timeout.
+// declareSuspicion marks a member as suspected. Renamed from declareFailure.
+func (p *PingAckManager) declareSuspicion(nodeID NodeID) {
 	if p.enableSuspicion {
 		p.membership.Lock()
 		memberKey := nodeID.String()
@@ -242,13 +238,14 @@ func (p *PingAckManager) declareFailure(nodeID NodeID) {
 		return
 	}
 
-	// If suspicion is disabled, we remove immediately (legacy behavior)
+	// If suspicion is disabled, we remove immediately
 	p.membership.Lock()
 	defer p.membership.Unlock()
 	memberKey := nodeID.String()
 	if member, exists := p.membership.Members[memberKey]; exists {
-		member.Status = Failed
-		p.membership.AddRecentUpdate(member)
+		// Gossip the failure before deleting
+		failedUpdate := &Member{ID: member.ID, Status: Failed, Incarnation: member.Incarnation}
+		p.membership.AddRecentUpdate(failedUpdate)
 		delete(p.membership.Members, memberKey)
 		log.Printf("Declared %s as FAILED", nodeID)
 		for _, hook := range p.membership.UpdateHooks {
@@ -260,26 +257,19 @@ func (p *PingAckManager) declareFailure(nodeID NodeID) {
 func (p *PingAckManager) processUpdate(update MemberUpdate, reporter NodeID) {
 	memberKey := update.NodeID.String()
 
-	// Don't process updates about self, except for suspicion refutation
 	if memberKey == p.membership.LocalNode.String() {
 		if update.Status == Suspected && p.enableSuspicion {
-			// Another node suspects us — let suspicion manager handle self-refutation.
-			// Pass the reporter who claimed the suspicion.
 			p.suspicionMgr.ProcessSuspicion(reporter, update.NodeID, update.Incarnation)
 		} else if update.Status == Alive {
-			// if someone reports us Alive with a higher incarnation, accept it
 			p.suspicionMgr.ClearSuspect(update.NodeID, update.Incarnation)
 		}
 		return
 	}
 
-	// Update membership entries — do quick membership updates while holding lock only for the minimal duration
 	p.membership.Lock()
 	member, exists := p.membership.Members[memberKey]
 
 	if !exists {
-		// New member discovered - accept it regardless of status
-		// This prevents missing members when they're first heard about as suspected
 		newMember := &Member{
 			ID:            update.NodeID,
 			Incarnation:   update.Incarnation,
@@ -287,7 +277,6 @@ func (p *PingAckManager) processUpdate(update MemberUpdate, reporter NodeID) {
 			LastHeartbeat: time.Now(),
 		}
 
-		// Set suspicion start time if initially suspected
 		if update.Status == Suspected {
 			newMember.SuspicionStart = time.Now()
 		}
@@ -295,26 +284,13 @@ func (p *PingAckManager) processUpdate(update MemberUpdate, reporter NodeID) {
 		p.membership.Members[memberKey] = newMember
 		p.membership.AddRecentUpdate(newMember)
 
-		// trigger join hooks (do it async)
 		for _, hook := range p.membership.UpdateHooks {
 			go hook(newMember, Joined)
 		}
 		p.membership.Unlock()
 		return
-	} else if exists {
-		// if update is Alive and incarnation is >= current -> refresh heartbeat
-		if update.Status == Alive && update.Incarnation >= member.Incarnation {
-			if update.Incarnation > member.Incarnation {
-				member.Incarnation = update.Incarnation
-			}
-			if member.Status != Alive {
-				member.Status = Alive
-				member.SuspicionStart = time.Time{}
-			}
-			member.LastHeartbeat = time.Now()
-			p.membership.AddRecentUpdate(member)
-		} else if update.Incarnation > member.Incarnation {
-			// existing behaviour for strictly higher incarnation
+	} else {
+		if update.Incarnation > member.Incarnation {
 			member.Incarnation = update.Incarnation
 			member.Status = update.Status
 			if update.Status == Alive {
@@ -324,15 +300,24 @@ func (p *PingAckManager) processUpdate(update MemberUpdate, reporter NodeID) {
 				member.SuspicionStart = time.Now()
 			}
 			p.membership.AddRecentUpdate(member)
+		} else if update.Incarnation == member.Incarnation {
+			if update.Status == Alive && member.Status == Suspected {
+				member.Status = Alive
+				member.LastHeartbeat = time.Now()
+				member.SuspicionStart = time.Time{}
+				p.membership.AddRecentUpdate(member)
+			} else if update.Status == Suspected && member.Status == Alive {
+				member.Status = Suspected
+				member.SuspicionStart = time.Now()
+				p.membership.AddRecentUpdate(member)
+			}
 		}
 	}
 	p.membership.Unlock()
 
-	// If the piggyback is a Suspect message, report that suspicion to the suspicion manager
 	if update.Status == Suspected && p.enableSuspicion {
 		p.suspicionMgr.ProcessSuspicion(reporter, update.NodeID, update.Incarnation)
 	}
-	// If piggyback says Alive, clear any tracked suspicion
 	if update.Status == Alive {
 		p.suspicionMgr.ClearSuspect(update.NodeID, update.Incarnation)
 	}
@@ -353,62 +338,36 @@ func (p *PingAckManager) failureDetectionLoop() {
 }
 
 func (p *PingAckManager) checkFailures() {
-	// We'll collect suspects to report after unlocking, and members to remove to notify hooks.
 	now := time.Now()
-	type suspectInfo struct {
-		id   string
-		node NodeID
-		inc  int32
-	}
-	var suspects []suspectInfo
-	var toRemove [](*Member)
+	var toRemove []*Member
 
 	p.membership.Lock()
 	for id, member := range p.membership.Members {
-		// Skip self
 		if id == p.membership.LocalNode.String() {
 			continue
 		}
 
-		switch member.Status {
-		case Alive:
-			if now.Sub(member.LastHeartbeat) > p.suspicionTime {
-				if p.enableSuspicion {
-					// mark suspected locally and start suspicion tracking
-					member.Status = Suspected
-					member.SuspicionStart = now
-					suspects = append(suspects, suspectInfo{id: id, node: member.ID, inc: member.Incarnation})
-				} else {
-					// direct failure without suspicion: schedule removal
-					toRemove = append(toRemove, cloneMember(member))
-					delete(p.membership.Members, id)
-				}
-			}
-		case Suspected:
+		if member.Status == Suspected {
 			if now.Sub(member.SuspicionStart) > p.failureTime {
-				// finalize failure: remove and schedule hooks
 				toRemove = append(toRemove, cloneMember(member))
 				delete(p.membership.Members, id)
+				// Add an update so other nodes learn about the failure via gossip
+				failedUpdate := &Member{ID: member.ID, Status: Failed, Incarnation: member.Incarnation}
+				p.membership.AddRecentUpdate(failedUpdate)
 			}
 		}
 	}
 	p.membership.Unlock()
 
-	// Report collected suspects to suspicion manager (we are the reporter)
-	for _, s := range suspects {
-		// Our local node is the reporter
-		p.suspicionMgr.ProcessSuspicion(p.membership.LocalNode, s.node, s.inc)
-	}
-
-	// Notify hooks for removed members (do this outside membership lock)
+	// Notify hooks for removed members
 	for _, m := range toRemove {
+		log.Printf("Declared %s as FAILED", m.ID)
 		for _, hook := range p.membership.UpdateHooks {
 			go hook(m, FailureDetected)
 		}
 	}
 }
 
-// cloneMember makes a shallow copy so we can safely hand objects to hooks after deletion.
 func cloneMember(m *Member) *Member {
 	if m == nil {
 		return nil
@@ -417,23 +376,19 @@ func cloneMember(m *Member) *Member {
 	return &c
 }
 
-// JoinGroup sends a join request to the introducer
 func (p *PingAckManager) JoinGroup(introducerAddr string) error {
 	if introducerAddr == "" {
-		return nil // This node is the introducer
+		return nil
 	}
-
 	joinMsg := Message{
 		Type:        Join,
 		Sender:      p.membership.LocalNode,
 		Incarnation: p.membership.Incarnation,
 	}
-
 	return p.network.Send(joinMsg, introducerAddr)
 }
 
 func (p *PingAckManager) handlePing(msg Message, from *net.UDPAddr) {
-	// Send ACK back immediately
 	ack := Message{
 		Type:        Ack,
 		Sender:      p.membership.LocalNode,
@@ -441,7 +396,6 @@ func (p *PingAckManager) handlePing(msg Message, from *net.UDPAddr) {
 		SeqNum:      msg.SeqNum,
 		Incarnation: p.membership.Incarnation,
 	}
-
 	if err := p.network.Send(ack, msg.Sender.Address()); err != nil {
 		log.Printf("Failed to send ACK to %s: %v", msg.Sender, err)
 	}
@@ -449,12 +403,10 @@ func (p *PingAckManager) handlePing(msg Message, from *net.UDPAddr) {
 	// log.Printf("Received PING from %s (seq %d), sent ACK", msg.Sender, msg.SeqNum)
 
 	p.membership.Lock()
-	// Update sender's heartbeat
 	senderKey := msg.Sender.String()
 	sender, exists := p.membership.Members[senderKey]
 
 	if !exists {
-		// New member discovered
 		newMember := &Member{
 			ID:            msg.Sender,
 			Incarnation:   msg.Incarnation,
@@ -462,16 +414,11 @@ func (p *PingAckManager) handlePing(msg Message, from *net.UDPAddr) {
 			LastHeartbeat: time.Now(),
 		}
 		p.membership.Members[senderKey] = newMember
-
-		// Add to recent updates for gossip propagation
 		p.membership.AddRecentUpdate(newMember)
-
-		// Trigger join hooks
 		for _, hook := range p.membership.UpdateHooks {
 			go hook(newMember, Joined)
 		}
 	} else {
-		// Update existing member
 		updated := false
 		if msg.Incarnation > sender.Incarnation {
 			sender.Incarnation = msg.Incarnation
@@ -481,38 +428,27 @@ func (p *PingAckManager) handlePing(msg Message, from *net.UDPAddr) {
 			updated = true
 		} else if msg.Incarnation == sender.Incarnation {
 			sender.LastHeartbeat = time.Now()
+			if sender.Status == Suspected {
+				sender.Status = Alive
+				sender.SuspicionStart = time.Time{}
+				updated = true
+			}
 		}
-
-		// Add to recent updates if we made a significant change
 		if updated {
 			p.membership.AddRecentUpdate(sender)
 		}
 	}
 
-	// We'll collect piggyback updates to process after unlocking so we can pass the reporter.
 	piggybacks := make([]MemberUpdate, 0, len(msg.Members))
 	piggybacks = append(piggybacks, msg.Members...)
 	p.membership.Unlock()
 
-	// Debug: log received updates
-	if len(piggybacks) > 0 {
-		// log.Printf("Received heartbeat from %s with %d piggybacked updates", msg.Sender, len(piggybacks))
-		for _, update := range piggybacks {
-			log.Printf("  <- %s: %s (Inc:%d)", update.NodeID, update.Status, update.Incarnation)
-		}
-	}
-
-	// Process piggybacked updates — reporter is the heartbeat message sender
 	for _, update := range piggybacks {
 		p.processUpdate(update, msg.Sender)
 	}
 }
 
-// handleAck processes ACK messages (direct responses to pings)
 func (p *PingAckManager) handleAck(msg Message, from *net.UDPAddr) {
-	// log.Printf("Received ACK from %s (seq %d)", msg.Sender, msg.SeqNum)
-
-	// 1) Refresh membership heartbeat for ACK sender
 	p.membership.Lock()
 	senderKey := msg.Sender.String()
 	if m, ok := p.membership.Members[senderKey]; ok {
@@ -525,12 +461,16 @@ func (p *PingAckManager) handleAck(msg Message, from *net.UDPAddr) {
 			updated = true
 		} else if msg.Incarnation == m.Incarnation {
 			m.LastHeartbeat = time.Now()
+			if m.Status == Suspected {
+				m.Status = Alive
+				m.SuspicionStart = time.Time{}
+				updated = true
+			}
 		}
 		if updated {
 			p.membership.AddRecentUpdate(m)
 		}
 	} else {
-		// discover new member on ACK path (unlikely but safe)
 		newM := &Member{ID: msg.Sender, Incarnation: msg.Incarnation, Status: Alive, LastHeartbeat: time.Now()}
 		p.membership.Members[senderKey] = newM
 		p.membership.AddRecentUpdate(newM)
@@ -540,10 +480,8 @@ func (p *PingAckManager) handleAck(msg Message, from *net.UDPAddr) {
 	}
 	p.membership.Unlock()
 
-	// Clear any tracked suspicion for this sender
 	p.suspicionMgr.ClearSuspect(msg.Sender, msg.Incarnation)
 
-	// 2) If this ACK corresponds to our own outstanding direct ping, signal it
 	p.mu.Lock()
 	if pending, ok := p.pendingAcks[msg.SeqNum]; ok && pending.target.Equals(msg.Sender) {
 		pending.directAck = true
@@ -554,66 +492,45 @@ func (p *PingAckManager) handleAck(msg Message, from *net.UDPAddr) {
 	}
 	p.mu.Unlock()
 
-	// 3) If this ACK completes an indirect probe we are relaying, notify waiter
 	indKey := fmt.Sprintf("%d|%s", msg.SeqNum, msg.Sender.String())
 	p.mu.Lock()
 	waiter, ok := p.pendingIndirect[indKey]
 	p.mu.Unlock()
 	if ok {
 		select {
-		case waiter.ch <- true:
+		case waiter.ch <- msg.Incarnation:
 		default:
 		}
 	}
 }
 
-// handleIndirectPing processes ping-req messages (indirect ping requests)
 func (p *PingAckManager) handleIndirectPing(msg Message, from *net.UDPAddr) {
 	log.Printf("Received ping-req from %s for target %s (seq %d)", msg.Sender, msg.Target, msg.SeqNum)
 
-	// Treat the requester as alive (we just heard from it)
 	p.membership.Lock()
 	reqKey := msg.Sender.String()
 	if m, ok := p.membership.Members[reqKey]; ok {
-		if msg.Incarnation > m.Incarnation {
-			m.Incarnation = msg.Incarnation
-			m.Status = Alive
-			m.SuspicionStart = time.Time{}
+		if msg.Incarnation >= m.Incarnation {
 			m.LastHeartbeat = time.Now()
-			p.membership.AddRecentUpdate(m)
-		} else if msg.Incarnation == m.Incarnation {
-			m.LastHeartbeat = time.Now()
-		}
-	} else {
-		newM := &Member{ID: msg.Sender, Incarnation: msg.Incarnation, Status: Alive, LastHeartbeat: time.Now()}
-		p.membership.Members[reqKey] = newM
-		p.membership.AddRecentUpdate(newM)
-		for _, hook := range p.membership.UpdateHooks {
-			go hook(newM, Joined)
 		}
 	}
-
-	// Capture piggyback updates from requester
 	piggybacks := make([]MemberUpdate, 0, len(msg.Members))
 	piggybacks = append(piggybacks, msg.Members...)
 	p.membership.Unlock()
 
-	// Register a short-lived waiter so when we get ACK from target we can forward IndirectAck to requester
 	key := fmt.Sprintf("%d|%s", msg.SeqNum, msg.Target.String())
 	w := &struct {
 		requester NodeID
-		ch        chan bool
-	}{requester: msg.Sender, ch: make(chan bool, 1)}
+		ch        chan int32
+	}{requester: msg.Sender, ch: make(chan int32, 1)}
 	p.mu.Lock()
 	p.pendingIndirect[key] = w
 	p.mu.Unlock()
 
-	// Process piggybacked updates with reporter=msg.Sender
 	for _, u := range piggybacks {
 		p.processUpdate(u, msg.Sender)
 	}
 
-	// Send a direct PING to the target with the same seq number and piggyback recent updates
 	updates := p.membership.GetRecentUpdates(5)
 	ping := Message{
 		Type:        Ping,
@@ -627,10 +544,9 @@ func (p *PingAckManager) handleIndirectPing(msg Message, from *net.UDPAddr) {
 		log.Printf("Failed to send proxy PING to %s: %v", msg.Target, err)
 	}
 
-	// Wait for ACK up to ackTimeout, then forward IndirectAck if received
 	go func(waitKey string, waiter *struct {
 		requester NodeID
-		ch        chan bool
+		ch        chan int32
 	}) {
 		t := time.NewTimer(p.ackTimeout)
 		defer t.Stop()
@@ -640,31 +556,28 @@ func (p *PingAckManager) handleIndirectPing(msg Message, from *net.UDPAddr) {
 			p.mu.Unlock()
 		}()
 		select {
-		case <-waiter.ch:
+		case receivedIncarnation := <-waiter.ch:
 			indAck := Message{
 				Type:        IndirectAck,
-				Sender:      p.membership.LocalNode, // proxy
-				Target:      msg.Target,             // the original target we probed
-				Incarnation: p.membership.Incarnation,
+				Sender:      p.membership.LocalNode,
+				Target:      msg.Target,
+				Incarnation: receivedIncarnation,
 				SeqNum:      msg.SeqNum,
 			}
 			if err := p.network.Send(indAck, waiter.requester.Address()); err != nil {
 				log.Printf("Failed to forward indirect ACK to %s: %v", waiter.requester, err)
 			} else {
-				log.Printf("Forwarded indirect ACK for %s (seq %d) to %s", msg.Target, msg.SeqNum, waiter.requester)
+				log.Printf("Forwarded indirect ACK for %s (inc: %d, seq: %d) to %s", msg.Target, receivedIncarnation, msg.SeqNum, waiter.requester)
 			}
 		case <-t.C:
-			// no ack observed within timeout; silently give up
 			log.Printf("Proxy PING timeout for %s (seq %d); no indirect ACK sent", msg.Target, msg.SeqNum)
 		}
 	}(key, w)
 }
 
-// handleIndirectAck processes indirect ACK messages
 func (p *PingAckManager) handleIndirectAck(msg Message, from *net.UDPAddr) {
-	log.Printf("Received indirect ACK from %s for target %s (seq %d)", msg.Sender, msg.Target, msg.SeqNum)
+	log.Printf("Received indirect ACK from %s for target %s (seq %d, inc %d)", msg.Sender, msg.Target, msg.SeqNum, msg.Incarnation)
 
-	// Satisfy any pending probe for this seq/target
 	p.mu.Lock()
 	if pending, ok := p.pendingAcks[msg.SeqNum]; ok && pending.target.Equals(msg.Target) {
 		pending.indirectAcks[msg.Sender.String()] = true
@@ -675,51 +588,41 @@ func (p *PingAckManager) handleIndirectAck(msg Message, from *net.UDPAddr) {
 	}
 	p.mu.Unlock()
 
-	// Refresh membership for the target (we learned it is alive via proxy)
 	p.membership.Lock()
 	targetKey := msg.Target.String()
 	if m, ok := p.membership.Members[targetKey]; ok {
-		// We don't know the target's new incarnation from IndirectAck; keep as-is but refresh liveness
-		m.Status = Alive
-		m.LastHeartbeat = time.Now()
-		m.SuspicionStart = time.Time{}
-		// no AddRecentUpdate unless status actually changed
-	}
-	// capture current inc for clearing suspicion
-	inc := int32(0)
-	if m, ok := p.membership.Members[targetKey]; ok {
-		inc = m.Incarnation
+		if msg.Incarnation >= m.Incarnation {
+			m.Incarnation = msg.Incarnation
+			m.LastHeartbeat = time.Now()
+			if m.Status != Alive {
+				m.Status = Alive
+				m.SuspicionStart = time.Time{}
+				p.membership.AddRecentUpdate(m)
+			}
+		}
 	}
 	p.membership.Unlock()
-	if inc > 0 {
-		p.suspicionMgr.ClearSuspect(msg.Target, inc)
-	} else {
-		// Best-effort clear even if we don't know inc
-		p.suspicionMgr.ClearSuspect(msg.Target, 0)
-	}
+
+	p.suspicionMgr.ClearSuspect(msg.Target, msg.Incarnation)
 }
 
 func (p *PingAckManager) handleJoin(msg Message, from *net.UDPAddr) {
 	p.membership.Lock()
 
-	// Add new member to membership list
 	newMember := &Member{
 		ID:            msg.Sender,
 		Incarnation:   msg.Incarnation,
 		Status:        Alive,
 		LastHeartbeat: time.Now(),
 	}
-
 	memberKey := msg.Sender.String()
 	p.membership.Members[memberKey] = newMember
 	p.membership.AddRecentUpdate(newMember)
 
-	// Trigger hooks for new member (do asynchronously)
 	for _, hook := range p.membership.UpdateHooks {
 		go hook(newMember, Joined)
 	}
 
-	// Build membership list for response
 	members := make([]MemberUpdate, 0, len(p.membership.Members))
 	for _, member := range p.membership.Members {
 		members = append(members, MemberUpdate{
@@ -738,43 +641,35 @@ func (p *PingAckManager) handleJoin(msg Message, from *net.UDPAddr) {
 		Members:     members,
 	}
 
-	// send response outside locks
 	p.network.Send(response, msg.Sender.Address())
 	log.Printf("New member joined: %s", msg.Sender)
 }
 
 func (p *PingAckManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
-	// We'll collect clears for any Alive updates and apply them after updating membership.
 	clears := []MemberUpdate{}
 
 	p.membership.Lock()
-	// Process all members from the response
 	for _, update := range msg.Members {
 		memberKey := update.NodeID.String()
 
-		// Skip self
 		if memberKey == p.membership.LocalNode.String() {
 			continue
 		}
 
 		member, exists := p.membership.Members[memberKey]
 		if !exists {
-			// New member
 			newMember := &Member{
 				ID:            update.NodeID,
 				Incarnation:   update.Incarnation,
 				Status:        update.Status,
 				LastHeartbeat: time.Now(),
 			}
-
 			if update.Status == Suspected {
 				newMember.SuspicionStart = time.Now()
 			}
-
 			p.membership.Members[memberKey] = newMember
 			p.membership.AddRecentUpdate(newMember)
 
-			// Trigger hooks for new member
 			for _, hook := range p.membership.UpdateHooks {
 				go hook(newMember, Joined)
 			}
@@ -782,20 +677,15 @@ func (p *PingAckManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
 				clears = append(clears, update)
 			}
 		} else if update.Incarnation > member.Incarnation {
-			// Update existing member
 			member.Incarnation = update.Incarnation
 			member.Status = update.Status
 			member.LastHeartbeat = time.Now()
-
 			if update.Status == Suspected {
 				member.SuspicionStart = time.Now()
 			} else if update.Status == Alive {
 				member.SuspicionStart = time.Time{}
 			}
-
 			p.membership.AddRecentUpdate(member)
-
-			// Trigger hooks for status change
 			for _, hook := range p.membership.UpdateHooks {
 				go hook(member, StatusChanged)
 			}
@@ -806,7 +696,6 @@ func (p *PingAckManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
 	}
 	p.membership.Unlock()
 
-	// Clear any tracked suspicions that are refuted by Alive reports
 	for _, u := range clears {
 		p.suspicionMgr.ClearSuspect(u.NodeID, u.Incarnation)
 	}
@@ -815,20 +704,21 @@ func (p *PingAckManager) handleJoinResponse(msg Message, from *net.UDPAddr) {
 }
 
 func (p *PingAckManager) handleAliveMessage(msg Message, from *net.UDPAddr) {
-	// Update membership and then clear any tracked suspicion outside the lock.
 	p.membership.Lock()
 	memberKey := msg.Sender.String()
 	member, exists := p.membership.Members[memberKey]
 
 	if exists && msg.Incarnation >= member.Incarnation {
-		member.Incarnation = msg.Incarnation
-		member.Status = Alive
-		member.LastHeartbeat = time.Now()
-		member.SuspicionStart = time.Time{}
+		if member.Status != Alive || msg.Incarnation > member.Incarnation {
+			member.Incarnation = msg.Incarnation
+			member.Status = Alive
+			member.LastHeartbeat = time.Now()
+			member.SuspicionStart = time.Time{}
+			p.membership.AddRecentUpdate(member)
+		}
 	}
 	p.membership.Unlock()
 
-	// Clear tracked suspicion (if any) outside membership lock
 	p.suspicionMgr.ClearSuspect(msg.Sender, msg.Incarnation)
 	if exists {
 		log.Printf("Member %s refuted suspicion with incarnation %d", msg.Sender, msg.Incarnation)
