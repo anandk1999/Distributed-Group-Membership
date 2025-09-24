@@ -143,7 +143,7 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 
 	select {
 	case <-pending.ackReceived:
-		log.Printf("Direct ACK received from %s (seq %d)", target.ID, seqNum)
+		// log.Printf("Direct ACK received from %s (seq %d)", target.ID, seqNum)
 		delete(p.pendingAcks, seqNum)
 		return
 
@@ -186,12 +186,12 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 
 	select {
 	case <-pending.ackReceived:
-		log.Printf("Indirect ACK received for %s (seq %d)", target.ID, seqNum)
+		// log.Printf("Indirect ACK received for %s (seq %d)", target.ID, seqNum)
 		delete(p.pendingAcks, seqNum)
 		return
 
 	case <-indirectAckTimer.C:
-		log.Printf("No ACKs received for %s (seq %d), declaring failure", target.ID, seqNum)
+		// log.Printf("No ACKs received for %s (seq %d), declaring failure", target.ID, seqNum)
 		delete(p.pendingAcks, seqNum)
 		p.declareFailure(target.ID)
 	}
@@ -398,7 +398,7 @@ func (p *PingAckManager) handlePing(msg Message, from *net.UDPAddr) {
 		log.Printf("Failed to send ACK to %s: %v", msg.Sender, err)
 	}
 
-	log.Printf("Received PING from %s (seq %d), sent ACK", msg.Sender, msg.SeqNum)
+	// log.Printf("Received PING from %s (seq %d), sent ACK", msg.Sender, msg.SeqNum)
 
 	p.membership.Lock()
 	// Update sender's heartbeat
@@ -448,7 +448,7 @@ func (p *PingAckManager) handlePing(msg Message, from *net.UDPAddr) {
 
 	// Debug: log received updates
 	if len(piggybacks) > 0 {
-		log.Printf("Received heartbeat from %s with %d piggybacked updates", msg.Sender, len(piggybacks))
+		// log.Printf("Received heartbeat from %s with %d piggybacked updates", msg.Sender, len(piggybacks))
 		for _, update := range piggybacks {
 			log.Printf("  <- %s: %s (Inc:%d)", update.NodeID, update.Status, update.Incarnation)
 		}
@@ -462,7 +462,7 @@ func (p *PingAckManager) handlePing(msg Message, from *net.UDPAddr) {
 
 // handleAck processes ACK messages (direct responses to pings)
 func (p *PingAckManager) handleAck(msg Message, from *net.UDPAddr) {
-	log.Printf("Received ACK from %s (seq %d)", msg.Sender, msg.SeqNum)
+	// log.Printf("Received ACK from %s (seq %d)", msg.Sender, msg.SeqNum)
 
 	// 1) Refresh membership heartbeat for ACK sender
 	p.membership.Lock()
