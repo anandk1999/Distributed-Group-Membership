@@ -44,7 +44,7 @@ func NewPingAckManager(ml *MembershipList, net *NetworkLayer, suspicionMgr *Susp
 		membership:     ml,
 		network:        net,
 		protocolPeriod: 2 * time.Second,
-		ackTimeout:     500 * time.Millisecond,
+		ackTimeout:     1 * time.Second,
 		k:              1,
 		suspicionTime:  2 * time.Second,
 		failureTime:    1 * time.Second,
@@ -720,9 +720,6 @@ func (p *PingAckManager) handleAliveMessage(msg Message, from *net.UDPAddr) {
 }
 
 func (p *PingAckManager) handleSuspectMessage(msg Message, from *net.UDPAddr) {
-	// When we receive an explicit Suspect message from some peer,
-	// pass it to the suspicion manager with the sender as the reporter.
-	// The suspicion manager's OnSuspect callback will update membership state (via callback).
 	if !p.enableSuspicion {
 		return
 	}
