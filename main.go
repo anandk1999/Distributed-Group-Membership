@@ -2,141 +2,130 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
-
-	. "mp2-g02/membership"
-	. "mp2-g02/network"
-	. "mp2-g02/pingack"
-	. "mp2-g02/suspicion"
-	. "mp2-g02/types"
+	"mp2-g02/membership"
+	"mp2-g02/network"
+	"mp2-g02/pingack"
+	"mp2-g02/suspicion"
+	"mp2-g02/types"
+	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
 
 type Controller struct {
-	mode DetectionMode
+	mode types.DetectionMode
 	// gossipManager  *GossipManager
-	pingAckManager *PingAckManager
-	membership     *MembershipList
-	network        *NetworkLayer
-	suspicionMgr   *SuspicionManager
+	pingAckManager *pingack.PingAckManager
+	membership     *membership.MembershipList
+	network        *network.NetworkLayer
+	suspicionMgr   *suspicion.SuspicionManager
 }
 
-func NewController(config Config) (*Controller, error) {
-	// Create network layer
-	network := NewNetworkLayer()
-
-	// Create membership list
-	membership := NewMembershipList(config.NodeID)
-
-	// Create suspicion manager with options and callbacks
-	opts := Options{
+func NewController(config types.Config) (*Controller, error) {
+	network := network.NewNetworkLayer()
+	membership := membership.NewMembershipList(config.NodeID)
+	opts := suspicion.Options{
 		SuspicionTimeout:   2 * time.Second,
 		CheckInterval:      200 * time.Millisecond,
 		RequireReports:     1,
 		ConfirmedRetention: 30 * time.Second,
-		OnSuspect: func(target NodeID, inc int32, reporters []NodeID) {
-			// Update local membership to Suspected under lock
+		OnSuspect: func(target types.NodeID, inc int32, reporters []types.NodeID) {
 			membership.Lock()
 			if m, ok := membership.Members[target.String()]; ok {
-				m.Status = Suspected
+				m.Status = types.Suspected
 				m.Incarnation = inc
 				m.SuspicionStart = time.Now()
 			}
-			// collect recipients snapshot
-			recips := make([]NodeID, 0, len(membership.Members))
+			recipients := make([]types.NodeID, 0, len(membership.Members))
 			for _, mm := range membership.Members {
 				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
 					continue
 				}
-				recips = append(recips, mm.ID)
+				recipients = append(recipients, mm.ID)
 			}
 			membership.Unlock()
 
-			// Build SUSPECT message and send outside any locks
-			msg := Message{
-				Type:        Suspect,
+			msg := types.Message{
+				Type:        types.Suspect,
 				Sender:      membership.LocalNode,
 				Target:      target,
 				Incarnation: inc,
 			}
-			for _, r := range recips {
+			for _, r := range recipients {
 				network.Send(msg, r.Address())
 			}
 			log.Printf("[OnSuspect] %s inc=%d reporters=%v", target, inc, reporters)
 		},
-		OnConfirm: func(target NodeID, inc int32) {
-			// update local membership
+		OnConfirm: func(target types.NodeID, inc int32) {
 			membership.Lock()
 			if m, ok := membership.Members[target.String()]; ok {
-				m.Status = Failed
+				m.Status = types.Failed
 				m.Incarnation = inc
 			}
-			// collect recipients snapshot
-			recips := make([]NodeID, 0, len(membership.Members))
+			recipients := make([]types.NodeID, 0, len(membership.Members))
 			for _, mm := range membership.Members {
 				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
 					continue
 				}
-				recips = append(recips, mm.ID)
+				recipients = append(recipients, mm.ID)
 			}
 			membership.Unlock()
 
-			// Build CONFIRM message and broadcast
-			msg := Message{
-				Type:        Confirm,
+			msg := types.Message{
+				Type:        types.Confirm,
 				Sender:      membership.LocalNode,
 				Target:      target,
 				Incarnation: inc,
 			}
-			for _, r := range recips {
+			for _, r := range recipients {
 				network.Send(msg, r.Address())
 			}
 			log.Printf("[OnConfirm] %s inc=%d", target, inc)
 		},
-		OnClear: func(target NodeID, inc int32) {
+		OnClear: func(target types.NodeID, inc int32) {
 			membership.Lock()
 			if m, ok := membership.Members[target.String()]; ok {
-				m.Status = Alive
+				m.Status = types.Alive
 				if inc >= m.Incarnation {
 					m.Incarnation = inc
 				}
 				m.LastHeartbeat = time.Now()
 				m.SuspicionStart = time.Time{}
 			}
-			// collect recipients snapshot
-			recips := make([]NodeID, 0, len(membership.Members))
+			recipients := make([]types.NodeID, 0, len(membership.Members))
 			for _, mm := range membership.Members {
 				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
 					continue
 				}
-				recips = append(recips, mm.ID)
+				recipients = append(recipients, mm.ID)
 			}
 			membership.Unlock()
 
-			// Optionally broadcast an ALIVE message so others can clear suspicion quickly
-			msg := Message{
-				Type:        AliveMsg,
+			msg := types.Message{
+				Type:        types.AliveMsg,
 				Sender:      membership.LocalNode,
 				Incarnation: inc,
 			}
-			for _, r := range recips {
+			for _, r := range recipients {
 				network.Send(msg, r.Address())
 			}
 			log.Printf("[OnClear] %s inc=%d", target, inc)
 		},
 	}
 
-	// We'll set callbacks after creating the manager, but we need the manager instance first.
-	suspicionMgr := NewSuspicionManager(membership, network, opts)
-
-	// Create gossip manager
+	suspicionMgr := suspicion.NewSuspicionManager(membership, network, opts)
 	// gossipManager := NewGossipManager(membership, network, suspicionMgr)
-	pingAckManager := NewPingAckManager(membership, network, suspicionMgr)
+	pingAckManager := pingack.NewPingAckManager(membership, network, suspicionMgr)
 
 	controller := &Controller{
 		mode: config.Mode,
@@ -161,9 +150,9 @@ func (c *Controller) Start() error {
 
 	// Start based on mode
 	switch c.mode {
-	case GossipMode:
+	case types.GossipMode:
 		// c.gossipManager.Start()
-	case PingAckMode:
+	case types.PingAckMode:
 		c.pingAckManager.Start()
 	}
 
@@ -174,9 +163,9 @@ func (c *Controller) Start() error {
 // JoinGroup joins the distributed group via introducer
 func (c *Controller) JoinGroup(introducerAddr string) error {
 	switch c.mode {
-	case GossipMode:
+	case types.GossipMode:
 		// return c.gossipManager.JoinGroup(introducerAddr)
-	case PingAckMode:
+	case types.PingAckMode:
 		return c.pingAckManager.JoinGroup(introducerAddr)
 	}
 	return nil
@@ -185,9 +174,9 @@ func (c *Controller) JoinGroup(introducerAddr string) error {
 func (c *Controller) Stop() {
 	// Stop managers & network
 	switch c.mode {
-	case GossipMode:
+	case types.GossipMode:
 		// c.gossipManager.Stop()
-	case PingAckMode:
+	case types.PingAckMode:
 		c.pingAckManager.Stop()
 	}
 	c.suspicionMgr.Stop()
@@ -224,18 +213,18 @@ func StartCLI(controller *Controller) {
 			statusInfo := ""
 
 			switch member.Status {
-			case Alive:
+			case types.Alive:
 				aliveCount++
 				if timeSinceHeartbeat > 5*time.Second {
-					statusInfo = fmt.Sprintf(" (⚠️ stale: %v)", timeSinceHeartbeat)
+					statusInfo = fmt.Sprintf(" (stale: %v)", timeSinceHeartbeat)
 				}
-			case Suspected:
+			case types.Suspected:
 				suspectedCount++
 				timeSinceSuspicion := time.Since(member.SuspicionStart)
-				statusInfo = fmt.Sprintf(" (🔍 suspected for: %v)", timeSinceSuspicion)
-			case Failed:
+				statusInfo = fmt.Sprintf(" (suspected for: %v)", timeSinceSuspicion)
+			case types.Failed:
 				failedCount++
-				statusInfo = " (💀 failed)"
+				statusInfo = " (failed)"
 			}
 
 			log.Printf("  %s | %s | Inc:%d | LastHB:%v ago%s",
@@ -257,43 +246,118 @@ func StartCLI(controller *Controller) {
 	}
 }
 
-func (c *Controller) SwitchMode(mode DetectionMode) {
+func (c *Controller) SwitchMode(mode types.DetectionMode) {
 	c.mode = mode
 
 	switch mode {
-	case GossipMode:
+	case types.GossipMode:
 		c.pingAckManager.Stop()
 		// c.gossipManager.Start()
-	case PingAckMode:
+	case types.PingAckMode:
 		// c.gossipManager.Stop()
 		c.pingAckManager.Start()
 	}
 }
 
+// Enable or disable suspicion in the current protocol manager
+func (c *Controller) SetSuspicion(enable bool) {
+	switch c.mode {
+	case types.PingAckMode:
+		c.pingAckManager.SetSuspicion(enable)
+	case types.GossipMode:
+		// c.gossipManager.SetSuspicion(enable)
+	}
+}
+
+func (c *Controller) GetProtocol() (string, string) {
+	mech := "gossip"
+	suspect := "nosuspect"
+	if c.mode == types.PingAckMode {
+		mech = "ping"
+		if c.pingAckManager != nil {
+			if c.pingAckManager.SuspicionEnabled() {
+				suspect = "suspect"
+			}
+		}
+	}
+	if c.mode == types.GossipMode {
+		mech = "gossip"
+		// if c.gossipManager != nil {
+		// 	if c.gossipManager.SuspicionEnabled() {
+		// 		suspect = "suspect"
+		// 	}
+		// }
+	}
+	return mech, suspect
+}
+
+func (c *Controller) LeaveGroup() {
+	switch c.mode {
+	case types.PingAckMode:
+		c.pingAckManager.LeaveGroup()
+	case types.GossipMode:
+		// TODO: implement when gossip is available\
+		// c.gossipManager.LeaveGroup()
+	}
+}
+
 func main() {
-	// Parse command line arguments
 	var (
-		port         = flag.Int("port", 8080, "UDP port to listen on")
-		introducerIP = flag.String("introducer", "", "Introducer IP:Port")
-		isIntroducer = flag.Bool("is-introducer", false, "Act as introducer")
-		mode         = flag.String("mode", "gossip", "Detection mode: gossip or pingack")
+		port          = flag.Int("port", 8080, "UDP port to listen on")
+		introducerIP  = flag.String("introducer", "", "Introducer IP:Port")
+		isIntroducer  = flag.Bool("is-introducer", false, "Act as introducer")
+		mode          = flag.String("mode", "gossip", "Detection mode: gossip or pingack")
+		cmd           = flag.String("cmd", "", "Client command: list_mem, list_self, join, leave, display_suspects, switch, display_protocol")
+		controlPortIn = flag.Int("control-port", 0, "Control server port on localhost (default: port+10000)")
+		arg1          = flag.String("arg1", "", "Optional argument 1 for cmd")
+		arg2          = flag.String("arg2", "", "Optional argument 2 for cmd")
+		foreground    = flag.Bool("foreground", false, "Run in foreground (do not daemonize)")
 	)
 	flag.Parse()
 
+	controlPort := *controlPortIn
+	if controlPort == 0 {
+		controlPort = *port + 10000
+	}
+
+	// If -cmd is provided, act as a client and exit
+	if *cmd != "" {
+		runClient(*cmd, controlPort, *arg1, *arg2)
+		return
+	}
+
+	// Daemonize (background) unless foreground requested or already daemonized
+	if !*foreground && os.Getenv("MP2_DAEMONIZED") != "1" {
+		exe, err := os.Executable()
+		if err != nil {
+			log.Fatalf("cannot get executable: %v", err)
+		}
+		args := os.Args[1:]
+		child := exec.Command(exe, args...)
+		child.Env = append(os.Environ(), "MP2_DAEMONIZED=1")
+		child.Stdin = nil
+		if err := child.Start(); err != nil {
+			log.Fatalf("failed to start daemon: %v", err)
+		}
+
+		fmt.Printf("Started mp2-node daemon pid=%d port=%d (control-port=%d)\n", child.Process.Pid, *port, controlPort)
+		return
+	}
+
 	// Get local IP
-	localIP := GetLocalIP()
-	nodeID := NodeID{
+	localIP := network.GetLocalIP()
+	nodeID := types.NodeID{
 		IP:        localIP,
 		Port:      *port,
 		Timestamp: time.Now().Unix(),
 	}
 
 	// Create controller
-	config := Config{
+	config := types.Config{
 		NodeID:         nodeID,
 		IntroducerAddr: *introducerIP,
 		IsIntroducer:   *isIntroducer,
-		Mode:           ParseMode(*mode),
+		Mode:           types.ParseMode(*mode),
 	}
 
 	controller, err := NewController(config)
@@ -306,6 +370,10 @@ func main() {
 		log.Fatalf("Failed to start controller: %v", err)
 	}
 
+	// Start control server (daemon API)
+	ctl := NewControlServer(controller, controlPort)
+	ctl.Start()
+
 	// Join the group if not introducer
 	if !*isIntroducer && *introducerIP != "" {
 		if err := controller.JoinGroup(*introducerIP); err != nil {
@@ -315,7 +383,6 @@ func main() {
 		}
 	}
 
-	// Start CLI handler in a goroutine
 	go StartCLI(controller)
 
 	// Wait for interrupt signal
@@ -324,5 +391,149 @@ func main() {
 	<-sigChan
 
 	fmt.Println("\nShutting down...")
+	// stop control server first
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ctl.Stop(shutdownCtx)
 	controller.Stop()
+}
+
+type ControlServer struct {
+	controller *Controller
+	srv        *http.Server
+}
+
+func NewControlServer(c *Controller, controlPort int) *ControlServer {
+	mux := http.NewServeMux()
+	cs := &ControlServer{controller: c}
+
+	mux.HandleFunc("/list_mem", cs.handleListMem)
+	mux.HandleFunc("/list_self", cs.handleListSelf)
+	mux.HandleFunc("/display_suspects", cs.handleDisplaySuspects)
+	mux.HandleFunc("/join", cs.handleJoin)
+	mux.HandleFunc("/leave", cs.handleLeave)
+	mux.HandleFunc("/switch", cs.handleSwitch)
+	mux.HandleFunc("/display_protocol", cs.handleDisplayProtocol)
+
+	cs.srv = &http.Server{
+		Addr:    fmt.Sprintf("127.0.0.1:%d", controlPort),
+		Handler: mux,
+	}
+	return cs
+}
+
+func (cs *ControlServer) Start() {
+	go func() {
+		log.Printf("Control server listening on http://%s", cs.srv.Addr)
+		if err := cs.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("control server error: %v", err)
+		}
+	}()
+}
+
+func (cs *ControlServer) Stop(ctx context.Context) {
+	_ = cs.srv.Shutdown(ctx)
+}
+
+func (cs *ControlServer) handleListMem(w http.ResponseWriter, r *http.Request) {
+	members := cs.controller.membership.GetAllMembers()
+	for _, member := range members {
+		fmt.Printf("  %s | %s | Inc:%d", member.ID, member.Status, member.Incarnation)
+	}
+}
+
+func (cs *ControlServer) handleListSelf(w http.ResponseWriter, r *http.Request) {
+	member := cs.controller.membership.Members[cs.controller.membership.LocalNode.String()]
+	fmt.Printf("  %s | %s | Inc:%d", member.ID, member.Status, member.Incarnation)
+}
+
+func (cs *ControlServer) handleDisplaySuspects(w http.ResponseWriter, r *http.Request) {
+	suspects := cs.controller.membership.GetSuspectedMembers()
+	for _, member := range suspects {
+		fmt.Printf("  %s | %s | Inc:%d", member.ID, member.Status, member.Incarnation)
+	}
+}
+
+func (cs *ControlServer) handleJoin(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	intro := q.Get("introducer")
+	if intro == "" {
+		http.Error(w, "introducer is required", http.StatusBadRequest)
+		return
+	}
+	if err := cs.controller.JoinGroup(intro); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	io.WriteString(w, "ok\n")
+}
+
+func (cs *ControlServer) handleLeave(w http.ResponseWriter, r *http.Request) {
+	cs.controller.LeaveGroup()
+	io.WriteString(w, "ok\n")
+}
+
+func (cs *ControlServer) handleSwitch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	mech := strings.ToLower(q.Get("mechanism"))
+	susp := strings.ToLower(q.Get("suspicion"))
+
+	if mech != "gossip" && mech != "ping" {
+		http.Error(w, "mechanism must be 'gossip' or 'ping'", http.StatusBadRequest)
+		return
+	}
+	if susp != "suspect" && susp != "nosuspect" {
+		http.Error(w, "suspicion must be 'suspect' or 'nosuspect'", http.StatusBadRequest)
+		return
+	}
+
+	if mech == "ping" {
+		cs.controller.SwitchMode(types.PingAckMode)
+	} else {
+		cs.controller.SwitchMode(types.GossipMode)
+	}
+	cs.controller.SetSuspicion(susp == "suspect")
+	io.WriteString(w, "ok\n")
+}
+
+func (cs *ControlServer) handleDisplayProtocol(w http.ResponseWriter, r *http.Request) {
+	mech, susp := cs.controller.GetProtocol()
+	fmt.Printf("Protocol being used is %s with %s", mech, susp)
+}
+
+func runClient(cmd string, controlPort int, arg1, arg2 string) {
+	base := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
+	var endpoint string
+	switch strings.ToLower(cmd) {
+	case "list_mem":
+		endpoint = "/list_mem"
+	case "list_self":
+		endpoint = "/list_self"
+	case "display_suspects":
+		endpoint = "/display_suspects"
+	case "join":
+		if arg1 == "" {
+			log.Fatal("join requires arg1=introducer ip:port")
+		}
+		endpoint = "/join?" + url.Values{"introducer": {arg1}}.Encode()
+	case "leave":
+		endpoint = "/leave"
+	case "switch":
+		// arg1=mechanism (gossip|ping), arg2=suspect|nosuspect
+		if arg1 == "" || arg2 == "" {
+			log.Fatal("switch requires arg1={gossip|ping} arg2={suspect|nosuspect}")
+		}
+		endpoint = "/switch?" + url.Values{"mechanism": {arg1}, "suspicion": {arg2}}.Encode()
+	case "display_protocol":
+		endpoint = "/display_protocol"
+	default:
+		log.Fatalf("unknown cmd: %s", cmd)
+	}
+	resp, err := http.Get(base + endpoint)
+	if err != nil {
+		log.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(body))
 }

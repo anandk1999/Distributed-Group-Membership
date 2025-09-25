@@ -3,43 +3,39 @@ package membership
 import (
 	"math/rand"
 	"mp2-g02/types"
-	. "mp2-g02/types"
 	"sync"
 	"time"
 )
 
 type MembershipList struct {
 	sync.RWMutex
-	LocalNode     NodeID
-	Members       map[string]*Member
+	LocalNode     types.NodeID
+	Members       map[string]*types.Member
 	Incarnation   int32
-	UpdateHooks   []func(*Member, ChangeType)
-	recentUpdates []MemberUpdate
+	recentUpdates []types.MemberUpdate
 	updateWindow  time.Duration
 }
 
-func NewMembershipList(localNode NodeID) *MembershipList {
+func NewMembershipList(localNode types.NodeID) *MembershipList {
 	ml := &MembershipList{
 		LocalNode:     localNode,
-		Members:       make(map[string]*Member),
+		Members:       make(map[string]*types.Member),
 		Incarnation:   0,
-		UpdateHooks:   []func(*Member, ChangeType){},
-		recentUpdates: []MemberUpdate{},
+		recentUpdates: []types.MemberUpdate{},
 		updateWindow:  5 * time.Second,
 	}
 
-	// Add self to membership
-	ml.Members[localNode.String()] = &Member{
+	ml.Members[localNode.String()] = &types.Member{
 		ID:            localNode,
 		Incarnation:   0,
-		Status:        Alive,
+		Status:        types.Alive,
 		LastHeartbeat: time.Now(),
 	}
 
 	return ml
 }
 
-func (ml *MembershipList) AddMember(member *Member) {
+func (ml *MembershipList) AddMember(member *types.Member) {
 	ml.Lock()
 	defer ml.Unlock()
 
@@ -47,15 +43,10 @@ func (ml *MembershipList) AddMember(member *Member) {
 	if !exists || member.Incarnation > existing.Incarnation {
 		ml.Members[member.ID.String()] = member
 		ml.AddRecentUpdate(member)
-
-		// Trigger hooks
-		for _, hook := range ml.UpdateHooks {
-			go hook(member, Joined)
-		}
 	}
 }
 
-func (ml *MembershipList) UpdateMember(nodeID string, status MemberStatus, incarnation int32) {
+func (ml *MembershipList) UpdateMember(nodeID string, status types.MemberStatus, incarnation int32) {
 	ml.Lock()
 	defer ml.Unlock()
 
@@ -65,18 +56,13 @@ func (ml *MembershipList) UpdateMember(nodeID string, status MemberStatus, incar
 			member.Status = status
 			member.Incarnation = incarnation
 
-			if status == Alive {
+			if status == types.Alive {
 				member.LastHeartbeat = time.Now()
-			} else if status == Suspected && oldStatus == Alive {
+			} else if status == types.Suspected && oldStatus == types.Alive {
 				member.SuspicionStart = time.Now()
 			}
 
 			ml.AddRecentUpdate(member)
-
-			// Trigger hooks
-			for _, hook := range ml.UpdateHooks {
-				go hook(member, StatusChanged)
-			}
 		}
 	}
 }
@@ -86,14 +72,9 @@ func (ml *MembershipList) RemoveMember(nodeID string) {
 	defer ml.Unlock()
 
 	if member, exists := ml.Members[nodeID]; exists {
-		member.Status = Failed
+		member.Status = types.Failed
 		ml.AddRecentUpdate(member)
 		delete(ml.Members, nodeID)
-
-		// Trigger hooks
-		for _, hook := range ml.UpdateHooks {
-			go hook(member, FailureDetected)
-		}
 	}
 }
 
@@ -128,13 +109,12 @@ func (ml *MembershipList) GetRandomMembers(n int, exclude []string) []*types.Mem
 	return candidates[:n]
 }
 
-func (ml *MembershipList) GetRecentUpdates(limit int) []MemberUpdate {
+func (ml *MembershipList) GetRecentUpdates(limit int) []types.MemberUpdate {
 	ml.Lock()
 	defer ml.Unlock()
 
-	// Clean old updates
 	cutoff := time.Now().Add(-ml.updateWindow)
-	var filtered []MemberUpdate
+	var filtered []types.MemberUpdate
 	for _, update := range ml.recentUpdates {
 		if update.Timestamp.After(cutoff) {
 			filtered = append(filtered, update)
@@ -153,8 +133,8 @@ func (ml *MembershipList) GetRecentUpdates(limit int) []MemberUpdate {
 	return filtered[:limit]
 }
 
-func (ml *MembershipList) AddRecentUpdate(member *Member) {
-	update := MemberUpdate{
+func (ml *MembershipList) AddRecentUpdate(member *types.Member) {
+	update := types.MemberUpdate{
 		NodeID:      member.ID,
 		Incarnation: member.Incarnation,
 		Status:      member.Status,
@@ -163,13 +143,13 @@ func (ml *MembershipList) AddRecentUpdate(member *Member) {
 	ml.recentUpdates = append(ml.recentUpdates, update)
 }
 
-func (ml *MembershipList) GetAllMembers() []*Member {
+func (ml *MembershipList) GetAllMembers() []*types.Member {
 	ml.RLock()
 	defer ml.RUnlock()
 
-	members := make([]*Member, 0, len(ml.Members))
+	members := make([]*types.Member, 0, len(ml.Members))
 	for _, member := range ml.Members {
-		members = append(members, &Member{
+		members = append(members, &types.Member{
 			ID:            member.ID,
 			Incarnation:   member.Incarnation,
 			Status:        member.Status,
@@ -177,6 +157,25 @@ func (ml *MembershipList) GetAllMembers() []*Member {
 		})
 	}
 	return members
+}
+
+func (ml *MembershipList) GetSuspectedMembers() []*types.Member {
+	ml.RLock()
+	defer ml.RUnlock()
+
+	var suspects []*types.Member
+	for _, m := range ml.Members {
+		if m.Status == types.Suspected {
+			suspects = append(suspects, &types.Member{
+				ID:             m.ID,
+				Incarnation:    m.Incarnation,
+				Status:         m.Status,
+				LastHeartbeat:  m.LastHeartbeat,
+				SuspicionStart: m.SuspicionStart,
+			})
+		}
+	}
+	return suspects
 }
 
 func (ml *MembershipList) IncrementIncarnation() {

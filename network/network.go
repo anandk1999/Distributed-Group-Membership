@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
-	. "mp2-g02/types"
+	"mp2-g02/types"
 	"net"
 	"sync"
 	"time"
@@ -27,13 +27,13 @@ type NetworkLayer struct {
 	conn         *net.UDPConn
 	dropRate     float32
 	messageQueue chan ReceivedMessage
-	handlers     map[MessageType]func(Message, *net.UDPAddr)
+	handlers     map[types.MessageType]func(types.Message, *net.UDPAddr)
 	closed       chan bool
 	mutex        sync.RWMutex
 }
 
 type ReceivedMessage struct {
-	Message Message
+	Message types.Message
 	From    *net.UDPAddr
 }
 
@@ -41,7 +41,7 @@ func NewNetworkLayer() *NetworkLayer {
 	return &NetworkLayer{
 		dropRate:     0.0,
 		messageQueue: make(chan ReceivedMessage, 1000),
-		handlers:     make(map[MessageType]func(Message, *net.UDPAddr)),
+		handlers:     make(map[types.MessageType]func(types.Message, *net.UDPAddr)),
 		closed:       make(chan bool),
 	}
 }
@@ -97,7 +97,7 @@ func (n *NetworkLayer) receiveLoop() {
 				continue
 			}
 
-			var msg Message
+			var msg types.Message
 			if err := json.Unmarshal(buffer[:bytesRead], &msg); err != nil {
 				log.Printf("Error unmarshaling message: %v", err)
 				continue
@@ -129,7 +129,7 @@ func (n *NetworkLayer) processQueue() {
 	}
 }
 
-func (n *NetworkLayer) Send(msg Message, target string) error {
+func (n *NetworkLayer) Send(msg types.Message, target string) error {
 	msg.Timestamp = time.Now().Unix()
 
 	data, err := json.Marshal(msg)
@@ -151,7 +151,7 @@ func (n *NetworkLayer) Send(msg Message, target string) error {
 	return err
 }
 
-func (n *NetworkLayer) RegisterHandler(msgType MessageType, handler func(Message, *net.UDPAddr)) {
+func (n *NetworkLayer) RegisterHandler(msgType types.MessageType, handler func(types.Message, *net.UDPAddr)) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 	n.handlers[msgType] = handler
