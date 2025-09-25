@@ -56,7 +56,7 @@ func NewPingAckManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspic
 			requester utils.NodeID
 			ch        chan int32
 		}),
-		enableSuspicion: true,
+		enableSuspicion: false,
 		active:          true,
 	}
 }
