@@ -438,19 +438,19 @@ func (cs *ControlServer) Stop(ctx context.Context) {
 func (cs *ControlServer) handleListMem(w http.ResponseWriter, r *http.Request) {
 	members := cs.controller.membership.GetAllMembers()
 	for _, member := range members {
-		fmt.Printf("  %s | %s | Inc:%d", member.ID, member.Status, member.Incarnation)
+		fmt.Fprintf(w, "  %s | %s | Inc:%d\n", member.ID, member.Status, member.Incarnation)
 	}
 }
 
 func (cs *ControlServer) handleListSelf(w http.ResponseWriter, r *http.Request) {
 	member := cs.controller.membership.Members[cs.controller.membership.LocalNode.String()]
-	fmt.Printf("  %s | %s | Inc:%d", member.ID, member.Status, member.Incarnation)
+	fmt.Fprintf(w, "  %s | %s | Inc:%d\n", member.ID, member.Status, member.Incarnation)
 }
 
 func (cs *ControlServer) handleDisplaySuspects(w http.ResponseWriter, r *http.Request) {
 	suspects := cs.controller.membership.GetSuspectedMembers()
 	for _, member := range suspects {
-		fmt.Printf("  %s | %s | Inc:%d", member.ID, member.Status, member.Incarnation)
+		fmt.Fprintf(w, "  %s | %s | Inc:%d\n", member.ID, member.Status, member.Incarnation)
 	}
 }
 
@@ -498,7 +498,7 @@ func (cs *ControlServer) handleSwitch(w http.ResponseWriter, r *http.Request) {
 
 func (cs *ControlServer) handleDisplayProtocol(w http.ResponseWriter, r *http.Request) {
 	mech, susp := cs.controller.GetProtocol()
-	fmt.Printf("Protocol being used is %s with %s", mech, susp)
+	fmt.Fprintf(w, "Protocol being used is %s with %s\n", mech, susp)
 }
 
 func runClient(cmd string, controlPort int, arg1, arg2 string) {
