@@ -13,11 +13,6 @@ if [ -z "$1" ]; then
   exit 1
 fi
 
-if [ -z "$2" ]; then
-  echo "Usage: $0 <introducer_ip:port>"
-  exit 1
-fi
-
 MACH_NUM=$(printf "%02d" $1)   # zero-pad to 2 digits if needed
 HOST="fa25-cs425-02${MACH_NUM}.cs.illinois.edu"
 
