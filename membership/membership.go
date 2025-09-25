@@ -201,10 +201,6 @@ func (ml *MembershipList) RefreshLocalNode() {
 
 	// Update local node reference
 	ml.LocalNode = newNodeID
-
-	// Increment incarnation for the rejoin
-	ml.Incarnation++
-
 	// Add the new local node to members with fresh info
 	ml.Members[newNodeID.String()] = &types.Member{
 		ID:            newNodeID,
