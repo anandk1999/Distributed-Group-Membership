@@ -739,6 +739,9 @@ func (p *PingAckManager) JoinGroup(introducerAddr string) error {
 	// Reactivate the node when joining (handles rejoin after leave)
 	p.active = true
 
+	// Refresh local node with new timestamp and incarnation (for rejoining)
+	p.membership.RefreshLocalNode()
+
 	joinMsg := types.Message{
 		Type:        types.Join,
 		Sender:      p.membership.LocalNode,

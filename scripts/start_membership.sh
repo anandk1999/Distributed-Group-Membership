@@ -75,7 +75,7 @@ start_introducer() {
         fi
         echo '✅ Port $PORT on $host is free. Starting introducer...'
         cd mp2-g02
-        nohup ./mp2-node -port $PORT -is-introducer -mode gossip > node.log 2>&1 < /dev/null &
+        nohup ./mp2-node -port $PORT -is-introducer -mode pingack -foreground > node.log 2>&1 < /dev/null &
         sleep 1
         echo '✅ Introducer started on $host'
         exit
@@ -96,7 +96,7 @@ start_normal_node() {
         fi
         echo '✅ Port $PORT on $host is free. Starting normal node...'
         cd mp2-g02
-        nohup ./mp2-node -port $PORT -introducer \"$introducer_addr\" -mode gossip > node.log 2>&1 < /dev/null &
+        nohup ./mp2-node -port $PORT -introducer \"$introducer_addr\" -mode pingack -foreground > node.log 2>&1 < /dev/null &
         sleep 1
         echo '✅ Normal node started on $host'
         exit

@@ -183,3 +183,33 @@ func (ml *MembershipList) IncrementIncarnation() {
 	defer ml.Unlock()
 	ml.Incarnation++
 }
+
+// RefreshLocalNode updates the local node with a new timestamp (for rejoining)
+func (ml *MembershipList) RefreshLocalNode() {
+	ml.Lock()
+	defer ml.Unlock()
+
+	// Create a new NodeID with fresh timestamp
+	newNodeID := types.NodeID{
+		IP:        ml.LocalNode.IP,
+		Port:      ml.LocalNode.Port,
+		Timestamp: time.Now().Unix(),
+	}
+
+	// Remove old entry from members map
+	delete(ml.Members, ml.LocalNode.String())
+
+	// Update local node reference
+	ml.LocalNode = newNodeID
+
+	// Increment incarnation for the rejoin
+	ml.Incarnation++
+
+	// Add the new local node to members with fresh info
+	ml.Members[newNodeID.String()] = &types.Member{
+		ID:            newNodeID,
+		Incarnation:   ml.Incarnation,
+		Status:        types.Alive,
+		LastHeartbeat: time.Now(),
+	}
+}
