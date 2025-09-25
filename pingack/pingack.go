@@ -367,18 +367,6 @@ func cloneMember(m *types.Member) *types.Member {
 	return &c
 }
 
-func (p *PingAckManager) JoinGroup(introducerAddr string) error {
-	if introducerAddr == "" {
-		return nil
-	}
-	joinMsg := types.Message{
-		Type:        types.Join,
-		Sender:      p.membership.LocalNode,
-		Incarnation: p.membership.Incarnation,
-	}
-	return p.network.Send(joinMsg, introducerAddr)
-}
-
 func (p *PingAckManager) handlePing(msg types.Message, from *net.UDPAddr) {
 	if !p.active {
 		return
@@ -741,6 +729,22 @@ func (p *PingAckManager) handleLeave(msg types.Message, from *net.UDPAddr) {
 		log.Printf("Member left voluntarily: %s", msg.Sender)
 	}
 	p.membership.Unlock()
+}
+
+func (p *PingAckManager) JoinGroup(introducerAddr string) error {
+	if introducerAddr == "" {
+		return nil
+	}
+
+	// Reactivate the node when joining (handles rejoin after leave)
+	p.active = true
+
+	joinMsg := types.Message{
+		Type:        types.Join,
+		Sender:      p.membership.LocalNode,
+		Incarnation: p.membership.Incarnation,
+	}
+	return p.network.Send(joinMsg, introducerAddr)
 }
 
 func (p *PingAckManager) LeaveGroup() {
