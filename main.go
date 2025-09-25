@@ -7,11 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"mp2-g02/membership"
-	"mp2-g02/network"
-	"mp2-g02/pingack"
-	"mp2-g02/suspicion"
-	"mp2-g02/types"
+	"mp2-g02/detectors"
+	"mp2-g02/utils"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,30 +20,30 @@ import (
 )
 
 type Controller struct {
-	mode types.DetectionMode
+	mode utils.DetectionMode
 	// gossipManager  *GossipManager
-	pingAckManager *pingack.PingAckManager
-	membership     *membership.MembershipList
-	network        *network.NetworkLayer
-	suspicionMgr   *suspicion.SuspicionManager
+	pingAckManager *detectors.PingAckManager
+	membership     *utils.MembershipList
+	network        *utils.NetworkLayer
+	suspicionMgr   *utils.SuspicionManager
 }
 
-func NewController(config types.Config) (*Controller, error) {
-	network := network.NewNetworkLayer()
-	membership := membership.NewMembershipList(config.NodeID)
-	opts := suspicion.Options{
+func NewController(config utils.Config) (*Controller, error) {
+	network := utils.NewNetworkLayer()
+	membership := utils.NewMembershipList(config.NodeID)
+	opts := utils.Options{
 		SuspicionTimeout:   2 * time.Second,
 		CheckInterval:      200 * time.Millisecond,
 		RequireReports:     1,
 		ConfirmedRetention: 30 * time.Second,
-		OnSuspect: func(target types.NodeID, inc int32, reporters []types.NodeID) {
+		OnSuspect: func(target utils.NodeID, inc int32, reporters []utils.NodeID) {
 			membership.Lock()
 			if m, ok := membership.Members[target.String()]; ok {
-				m.Status = types.Suspected
+				m.Status = utils.Suspected
 				m.Incarnation = inc
 				m.SuspicionStart = time.Now()
 			}
-			recipients := make([]types.NodeID, 0, len(membership.Members))
+			recipients := make([]utils.NodeID, 0, len(membership.Members))
 			for _, mm := range membership.Members {
 				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
 					continue
@@ -55,8 +52,8 @@ func NewController(config types.Config) (*Controller, error) {
 			}
 			membership.Unlock()
 
-			msg := types.Message{
-				Type:        types.Suspect,
+			msg := utils.Message{
+				Type:        utils.Suspect,
 				Sender:      membership.LocalNode,
 				Target:      target,
 				Incarnation: inc,
@@ -66,13 +63,13 @@ func NewController(config types.Config) (*Controller, error) {
 			}
 			log.Printf("[OnSuspect] %s inc=%d reporters=%v", target, inc, reporters)
 		},
-		OnConfirm: func(target types.NodeID, inc int32) {
+		OnConfirm: func(target utils.NodeID, inc int32) {
 			membership.Lock()
 			if m, ok := membership.Members[target.String()]; ok {
-				m.Status = types.Failed
+				m.Status = utils.Failed
 				m.Incarnation = inc
 			}
-			recipients := make([]types.NodeID, 0, len(membership.Members))
+			recipients := make([]utils.NodeID, 0, len(membership.Members))
 			for _, mm := range membership.Members {
 				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
 					continue
@@ -81,8 +78,8 @@ func NewController(config types.Config) (*Controller, error) {
 			}
 			membership.Unlock()
 
-			msg := types.Message{
-				Type:        types.Confirm,
+			msg := utils.Message{
+				Type:        utils.Confirm,
 				Sender:      membership.LocalNode,
 				Target:      target,
 				Incarnation: inc,
@@ -92,17 +89,17 @@ func NewController(config types.Config) (*Controller, error) {
 			}
 			log.Printf("[OnConfirm] %s inc=%d", target, inc)
 		},
-		OnClear: func(target types.NodeID, inc int32) {
+		OnClear: func(target utils.NodeID, inc int32) {
 			membership.Lock()
 			if m, ok := membership.Members[target.String()]; ok {
-				m.Status = types.Alive
+				m.Status = utils.Alive
 				if inc >= m.Incarnation {
 					m.Incarnation = inc
 				}
 				m.LastHeartbeat = time.Now()
 				m.SuspicionStart = time.Time{}
 			}
-			recipients := make([]types.NodeID, 0, len(membership.Members))
+			recipients := make([]utils.NodeID, 0, len(membership.Members))
 			for _, mm := range membership.Members {
 				if mm.ID.String() == membership.LocalNode.String() || mm.ID.String() == target.String() {
 					continue
@@ -111,8 +108,8 @@ func NewController(config types.Config) (*Controller, error) {
 			}
 			membership.Unlock()
 
-			msg := types.Message{
-				Type:        types.AliveMsg,
+			msg := utils.Message{
+				Type:        utils.AliveMsg,
 				Sender:      membership.LocalNode,
 				Incarnation: inc,
 			}
@@ -123,9 +120,9 @@ func NewController(config types.Config) (*Controller, error) {
 		},
 	}
 
-	suspicionMgr := suspicion.NewSuspicionManager(membership, network, opts)
+	suspicionMgr := utils.NewSuspicionManager(membership, network, opts)
 	// gossipManager := NewGossipManager(membership, network, suspicionMgr)
-	pingAckManager := pingack.NewPingAckManager(membership, network, suspicionMgr)
+	pingAckManager := detectors.NewPingAckManager(membership, network, suspicionMgr)
 
 	controller := &Controller{
 		mode: config.Mode,
@@ -150,9 +147,9 @@ func (c *Controller) Start() error {
 
 	// Start based on mode
 	switch c.mode {
-	case types.GossipMode:
+	case utils.GossipMode:
 		// c.gossipManager.Start()
-	case types.PingAckMode:
+	case utils.PingAckMode:
 		c.pingAckManager.Start()
 	}
 
@@ -163,9 +160,9 @@ func (c *Controller) Start() error {
 // JoinGroup joins the distributed group via introducer
 func (c *Controller) JoinGroup(introducerAddr string) error {
 	switch c.mode {
-	case types.GossipMode:
+	case utils.GossipMode:
 		// return c.gossipManager.JoinGroup(introducerAddr)
-	case types.PingAckMode:
+	case utils.PingAckMode:
 		return c.pingAckManager.JoinGroup(introducerAddr)
 	}
 	return nil
@@ -174,9 +171,9 @@ func (c *Controller) JoinGroup(introducerAddr string) error {
 func (c *Controller) Stop() {
 	// Stop managers & network
 	switch c.mode {
-	case types.GossipMode:
+	case utils.GossipMode:
 		// c.gossipManager.Stop()
-	case types.PingAckMode:
+	case utils.PingAckMode:
 		c.pingAckManager.Stop()
 	}
 	c.suspicionMgr.Stop()
@@ -213,16 +210,16 @@ func StartCLI(controller *Controller) {
 			statusInfo := ""
 
 			switch member.Status {
-			case types.Alive:
+			case utils.Alive:
 				aliveCount++
 				if timeSinceHeartbeat > 5*time.Second {
 					statusInfo = fmt.Sprintf(" (stale: %v)", timeSinceHeartbeat)
 				}
-			case types.Suspected:
+			case utils.Suspected:
 				suspectedCount++
 				timeSinceSuspicion := time.Since(member.SuspicionStart)
 				statusInfo = fmt.Sprintf(" (suspected for: %v)", timeSinceSuspicion)
-			case types.Failed:
+			case utils.Failed:
 				failedCount++
 				statusInfo = " (failed)"
 			}
@@ -246,14 +243,14 @@ func StartCLI(controller *Controller) {
 	}
 }
 
-func (c *Controller) SwitchMode(mode types.DetectionMode) {
+func (c *Controller) SwitchMode(mode utils.DetectionMode) {
 	c.mode = mode
 
 	switch mode {
-	case types.GossipMode:
+	case utils.GossipMode:
 		c.pingAckManager.Stop()
 		// c.gossipManager.Start()
-	case types.PingAckMode:
+	case utils.PingAckMode:
 		// c.gossipManager.Stop()
 		c.pingAckManager.Start()
 	}
@@ -262,9 +259,9 @@ func (c *Controller) SwitchMode(mode types.DetectionMode) {
 // Enable or disable suspicion in the current protocol manager
 func (c *Controller) SetSuspicion(enable bool) {
 	switch c.mode {
-	case types.PingAckMode:
+	case utils.PingAckMode:
 		c.pingAckManager.SetSuspicion(enable)
-	case types.GossipMode:
+	case utils.GossipMode:
 		// c.gossipManager.SetSuspicion(enable)
 	}
 }
@@ -272,7 +269,7 @@ func (c *Controller) SetSuspicion(enable bool) {
 func (c *Controller) GetProtocol() (string, string) {
 	mech := "gossip"
 	suspect := "nosuspect"
-	if c.mode == types.PingAckMode {
+	if c.mode == utils.PingAckMode {
 		mech = "ping"
 		if c.pingAckManager != nil {
 			if c.pingAckManager.SuspicionEnabled() {
@@ -280,7 +277,7 @@ func (c *Controller) GetProtocol() (string, string) {
 			}
 		}
 	}
-	if c.mode == types.GossipMode {
+	if c.mode == utils.GossipMode {
 		mech = "gossip"
 		// if c.gossipManager != nil {
 		// 	if c.gossipManager.SuspicionEnabled() {
@@ -293,9 +290,9 @@ func (c *Controller) GetProtocol() (string, string) {
 
 func (c *Controller) LeaveGroup() {
 	switch c.mode {
-	case types.PingAckMode:
+	case utils.PingAckMode:
 		c.pingAckManager.LeaveGroup()
-	case types.GossipMode:
+	case utils.GossipMode:
 		// TODO: implement when gossip is available\
 		// c.gossipManager.LeaveGroup()
 	}
@@ -345,19 +342,19 @@ func main() {
 	}
 
 	// Get local IP
-	localIP := network.GetLocalIP()
-	nodeID := types.NodeID{
+	localIP := utils.GetLocalIP()
+	nodeID := utils.NodeID{
 		IP:        localIP,
 		Port:      *port,
 		Timestamp: time.Now().Unix(),
 	}
 
 	// Create controller
-	config := types.Config{
+	config := utils.Config{
 		NodeID:         nodeID,
 		IntroducerAddr: *introducerIP,
 		IsIntroducer:   *isIntroducer,
-		Mode:           types.ParseMode(*mode),
+		Mode:           utils.ParseMode(*mode),
 	}
 
 	controller, err := NewController(config)
@@ -438,7 +435,9 @@ func (cs *ControlServer) Stop(ctx context.Context) {
 func (cs *ControlServer) handleListMem(w http.ResponseWriter, r *http.Request) {
 	members := cs.controller.membership.GetAllMembers()
 	for _, member := range members {
-		fmt.Fprintf(w, "  %s | %s | Inc:%d\n", member.ID, member.Status, member.Incarnation)
+		if member.Status == utils.Alive {
+			fmt.Fprintf(w, "  %s | %s | Inc:%d\n", member.ID, member.Status, member.Incarnation)
+		}
 	}
 }
 
@@ -488,9 +487,9 @@ func (cs *ControlServer) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if mech == "ping" {
-		cs.controller.SwitchMode(types.PingAckMode)
+		cs.controller.SwitchMode(utils.PingAckMode)
 	} else {
-		cs.controller.SwitchMode(types.GossipMode)
+		cs.controller.SwitchMode(utils.GossipMode)
 	}
 	cs.controller.SetSuspicion(susp == "suspect")
 	io.WriteString(w, "ok\n")

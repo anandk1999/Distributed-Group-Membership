@@ -1,41 +1,40 @@
-package membership
+package utils
 
 import (
 	"math/rand"
-	"mp2-g02/types"
 	"sync"
 	"time"
 )
 
 type MembershipList struct {
 	sync.RWMutex
-	LocalNode     types.NodeID
-	Members       map[string]*types.Member
+	LocalNode     NodeID
+	Members       map[string]*Member
 	Incarnation   int32
-	recentUpdates []types.MemberUpdate
+	recentUpdates []MemberUpdate
 	updateWindow  time.Duration
 }
 
-func NewMembershipList(localNode types.NodeID) *MembershipList {
+func NewMembershipList(localNode NodeID) *MembershipList {
 	ml := &MembershipList{
 		LocalNode:     localNode,
-		Members:       make(map[string]*types.Member),
+		Members:       make(map[string]*Member),
 		Incarnation:   0,
-		recentUpdates: []types.MemberUpdate{},
+		recentUpdates: []MemberUpdate{},
 		updateWindow:  5 * time.Second,
 	}
 
-	ml.Members[localNode.String()] = &types.Member{
+	ml.Members[localNode.String()] = &Member{
 		ID:            localNode,
 		Incarnation:   0,
-		Status:        types.Alive,
+		Status:        Alive,
 		LastHeartbeat: time.Now(),
 	}
 
 	return ml
 }
 
-func (ml *MembershipList) AddMember(member *types.Member) {
+func (ml *MembershipList) AddMember(member *Member) {
 	ml.Lock()
 	defer ml.Unlock()
 
@@ -46,7 +45,7 @@ func (ml *MembershipList) AddMember(member *types.Member) {
 	}
 }
 
-func (ml *MembershipList) UpdateMember(nodeID string, status types.MemberStatus, incarnation int32) {
+func (ml *MembershipList) UpdateMember(nodeID string, status MemberStatus, incarnation int32) {
 	ml.Lock()
 	defer ml.Unlock()
 
@@ -56,9 +55,9 @@ func (ml *MembershipList) UpdateMember(nodeID string, status types.MemberStatus,
 			member.Status = status
 			member.Incarnation = incarnation
 
-			if status == types.Alive {
+			if status == Alive {
 				member.LastHeartbeat = time.Now()
-			} else if status == types.Suspected && oldStatus == types.Alive {
+			} else if status == Suspected && oldStatus == Alive {
 				member.SuspicionStart = time.Now()
 			}
 
@@ -72,24 +71,24 @@ func (ml *MembershipList) RemoveMember(nodeID string) {
 	defer ml.Unlock()
 
 	if member, exists := ml.Members[nodeID]; exists {
-		member.Status = types.Failed
+		member.Status = Failed
 		ml.AddRecentUpdate(member)
 		delete(ml.Members, nodeID)
 	}
 }
 
-func (ml *MembershipList) GetRandomMembers(n int, exclude []string) []*types.Member {
+func (ml *MembershipList) GetRandomMembers(n int, exclude []string) []*Member {
 	ml.RLock()
 	defer ml.RUnlock()
 
-	var candidates []*types.Member
+	var candidates []*Member
 	excludeMap := make(map[string]bool)
 	for _, e := range exclude {
 		excludeMap[e] = true
 	}
 
 	for id, member := range ml.Members {
-		if !excludeMap[id] && member.Status == types.Alive && id != ml.LocalNode.String() {
+		if !excludeMap[id] && member.Status == Alive && id != ml.LocalNode.String() {
 			candidates = append(candidates, member)
 		}
 	}
@@ -109,12 +108,12 @@ func (ml *MembershipList) GetRandomMembers(n int, exclude []string) []*types.Mem
 	return candidates[:n]
 }
 
-func (ml *MembershipList) GetRecentUpdates(limit int) []types.MemberUpdate {
+func (ml *MembershipList) GetRecentUpdates(limit int) []MemberUpdate {
 	ml.Lock()
 	defer ml.Unlock()
 
 	cutoff := time.Now().Add(-ml.updateWindow)
-	var filtered []types.MemberUpdate
+	var filtered []MemberUpdate
 	for _, update := range ml.recentUpdates {
 		if update.Timestamp.After(cutoff) {
 			filtered = append(filtered, update)
@@ -133,8 +132,8 @@ func (ml *MembershipList) GetRecentUpdates(limit int) []types.MemberUpdate {
 	return filtered[:limit]
 }
 
-func (ml *MembershipList) AddRecentUpdate(member *types.Member) {
-	update := types.MemberUpdate{
+func (ml *MembershipList) AddRecentUpdate(member *Member) {
+	update := MemberUpdate{
 		NodeID:      member.ID,
 		Incarnation: member.Incarnation,
 		Status:      member.Status,
@@ -143,13 +142,13 @@ func (ml *MembershipList) AddRecentUpdate(member *types.Member) {
 	ml.recentUpdates = append(ml.recentUpdates, update)
 }
 
-func (ml *MembershipList) GetAllMembers() []*types.Member {
+func (ml *MembershipList) GetAllMembers() []*Member {
 	ml.RLock()
 	defer ml.RUnlock()
 
-	members := make([]*types.Member, 0, len(ml.Members))
+	members := make([]*Member, 0, len(ml.Members))
 	for _, member := range ml.Members {
-		members = append(members, &types.Member{
+		members = append(members, &Member{
 			ID:            member.ID,
 			Incarnation:   member.Incarnation,
 			Status:        member.Status,
@@ -159,14 +158,14 @@ func (ml *MembershipList) GetAllMembers() []*types.Member {
 	return members
 }
 
-func (ml *MembershipList) GetSuspectedMembers() []*types.Member {
+func (ml *MembershipList) GetSuspectedMembers() []*Member {
 	ml.RLock()
 	defer ml.RUnlock()
 
-	var suspects []*types.Member
+	var suspects []*Member
 	for _, m := range ml.Members {
-		if m.Status == types.Suspected {
-			suspects = append(suspects, &types.Member{
+		if m.Status == Suspected {
+			suspects = append(suspects, &Member{
 				ID:             m.ID,
 				Incarnation:    m.Incarnation,
 				Status:         m.Status,
@@ -190,7 +189,7 @@ func (ml *MembershipList) RefreshLocalNode() {
 	defer ml.Unlock()
 
 	// Create a new NodeID with fresh timestamp
-	newNodeID := types.NodeID{
+	newNodeID := NodeID{
 		IP:        ml.LocalNode.IP,
 		Port:      ml.LocalNode.Port,
 		Timestamp: time.Now().Unix(),
@@ -202,10 +201,10 @@ func (ml *MembershipList) RefreshLocalNode() {
 	// Update local node reference
 	ml.LocalNode = newNodeID
 	// Add the new local node to members with fresh info
-	ml.Members[newNodeID.String()] = &types.Member{
+	ml.Members[newNodeID.String()] = &Member{
 		ID:            newNodeID,
 		Incarnation:   ml.Incarnation,
-		Status:        types.Alive,
+		Status:        Alive,
 		LastHeartbeat: time.Now(),
 	}
 }

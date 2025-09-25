@@ -1,10 +1,7 @@
-package suspicion
+package utils
 
 import (
 	"context"
-	"mp2-g02/membership"
-	"mp2-g02/network"
-	"mp2-g02/types"
 	"sync"
 	"time"
 )
@@ -15,14 +12,14 @@ type Options struct {
 	RequireReports     int
 	ConfirmedRetention time.Duration
 
-	OnSuspect func(target types.NodeID, inc int32, reporters []types.NodeID)
-	OnConfirm func(target types.NodeID, inc int32)
-	OnClear   func(target types.NodeID, inc int32)
+	OnSuspect func(target NodeID, inc int32, reporters []NodeID)
+	OnConfirm func(target NodeID, inc int32)
+	OnClear   func(target NodeID, inc int32)
 }
 type suspectEntry struct {
-	target       types.NodeID
+	target       NodeID
 	incarnation  int32
-	reporters    map[types.NodeID]time.Time
+	reporters    map[NodeID]time.Time
 	firstReport  time.Time
 	confirmed    bool
 	confirmedAt  time.Time
@@ -30,8 +27,8 @@ type suspectEntry struct {
 }
 type SuspicionManager struct {
 	mu         sync.Mutex
-	membership *membership.MembershipList
-	network    *network.NetworkLayer
+	membership *MembershipList
+	network    *NetworkLayer
 	opts       Options
 	entries    map[string]*suspectEntry
 	ctx        context.Context
@@ -40,7 +37,7 @@ type SuspicionManager struct {
 	started    bool
 }
 
-func NewSuspicionManager(m *membership.MembershipList, n *network.NetworkLayer, opts Options) *SuspicionManager {
+func NewSuspicionManager(m *MembershipList, n *NetworkLayer, opts Options) *SuspicionManager {
 	if opts.SuspicionTimeout == 0 {
 		opts.SuspicionTimeout = 2500 * time.Millisecond
 	}
@@ -89,7 +86,7 @@ func (sm *SuspicionManager) Stop() {
 	sm.mu.Unlock()
 }
 
-func (sm *SuspicionManager) ProcessSuspicion(reporter types.NodeID, target types.NodeID, inc int32) {
+func (sm *SuspicionManager) ProcessSuspicion(reporter NodeID, target NodeID, inc int32) {
 	now := time.Now()
 	key := target.String()
 
@@ -109,7 +106,7 @@ func (sm *SuspicionManager) ProcessSuspicion(reporter types.NodeID, target types
 			e = &suspectEntry{
 				target:      target,
 				incarnation: inc,
-				reporters:   make(map[types.NodeID]time.Time),
+				reporters:   make(map[NodeID]time.Time),
 			}
 			sm.entries[key] = e
 		}
@@ -129,7 +126,7 @@ func (sm *SuspicionManager) ProcessSuspicion(reporter types.NodeID, target types
 		e = &suspectEntry{
 			target:      target,
 			incarnation: inc,
-			reporters:   make(map[types.NodeID]time.Time),
+			reporters:   make(map[NodeID]time.Time),
 		}
 		sm.entries[key] = e
 	}
@@ -143,7 +140,7 @@ func (sm *SuspicionManager) ProcessSuspicion(reporter types.NodeID, target types
 		sm.membership.Lock()
 		m := sm.membership.Members[target.String()]
 		if m != nil {
-			m.Status = types.Suspected
+			m.Status = Suspected
 			m.SuspicionStart = e.firstReport
 		}
 		sm.membership.Unlock()
@@ -156,7 +153,7 @@ func (sm *SuspicionManager) ProcessSuspicion(reporter types.NodeID, target types
 	sm.mu.Unlock()
 }
 
-func (sm *SuspicionManager) ClearSuspect(target types.NodeID, inc int32) {
+func (sm *SuspicionManager) ClearSuspect(target NodeID, inc int32) {
 	key := target.String()
 
 	sm.mu.Lock()
@@ -167,7 +164,7 @@ func (sm *SuspicionManager) ClearSuspect(target types.NodeID, inc int32) {
 		m := sm.membership.Members[key]
 		if m != nil {
 			if inc >= m.Incarnation {
-				m.Status = types.Alive
+				m.Status = Alive
 				m.Incarnation = inc
 			}
 		}
@@ -184,7 +181,7 @@ func (sm *SuspicionManager) ClearSuspect(target types.NodeID, inc int32) {
 	sm.membership.Lock()
 	if m := sm.membership.Members[key]; m != nil {
 		if inc >= m.Incarnation {
-			m.Status = types.Alive
+			m.Status = Alive
 			m.Incarnation = inc
 		}
 	}
@@ -207,8 +204,8 @@ func (sm *SuspicionManager) handleSelfRefutation(incomingInc int32) {
 	sm.membership.Incarnation = newInc
 	sm.membership.Unlock()
 
-	msg := types.Message{
-		Type:        types.AliveMsg,
+	msg := Message{
+		Type:        AliveMsg,
 		Sender:      sm.membership.LocalNode,
 		Incarnation: newInc,
 	}
@@ -246,7 +243,7 @@ func (sm *SuspicionManager) loop() {
 
 func (sm *SuspicionManager) check(now time.Time) {
 	type confirmAction struct {
-		target types.NodeID
+		target NodeID
 		inc    int32
 	}
 
@@ -281,7 +278,7 @@ func (sm *SuspicionManager) check(now time.Time) {
 	for _, c := range toConfirm {
 		sm.membership.Lock()
 		if m := sm.membership.Members[c.target.String()]; m != nil {
-			m.Status = types.Failed
+			m.Status = Failed
 		}
 		sm.membership.Unlock()
 
@@ -291,8 +288,8 @@ func (sm *SuspicionManager) check(now time.Time) {
 	}
 }
 
-func (sm *SuspicionManager) reportersList(e *suspectEntry) []types.NodeID {
-	out := make([]types.NodeID, 0, len(e.reporters))
+func (sm *SuspicionManager) reportersList(e *suspectEntry) []NodeID {
+	out := make([]NodeID, 0, len(e.reporters))
 	for r := range e.reporters {
 		out = append(out, r)
 	}
