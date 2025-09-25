@@ -6,14 +6,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$SCRIPT_DIR/.env" ] && source "$SCRIPT_DIR/.env"
 REMOTE_USER="${REMOTE_USER:-saik2}"
 
-HOSTS_FILE="../hosts.txt"
+if [ -z "$1" ]; then
+  echo "Usage: $0 <machine_number 01-10>"
+  exit 1
+fi
 
-for HOST in $(cat "$HOSTS_FILE"); do
-  (
-    echo ">>> Killing processes on port 8080 at $HOST"
-    ssh "$REMOTE_USER@$HOST" '
-      pkill -f mp2-node
-    '
-  ) &
-done
-wait
+MACH_NUM=$(printf "%02d" $1)   # zero-pad to 2 digits if needed
+HOST="fa25-cs425-02${MACH_NUM}.cs.illinois.edu"
+
+echo ">>> Killing process on port 8080 at $HOST"
+ssh "$REMOTE_USER@$HOST" 'pkill -f mp2-node'
