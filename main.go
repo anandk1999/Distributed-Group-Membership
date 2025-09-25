@@ -21,7 +21,7 @@ import (
 
 type Controller struct {
 	mode utils.DetectionMode
-	// gossipManager  *GossipManager
+	// gossipManager  *detectors.GossipManager
 	pingAckManager *detectors.PingAckManager
 	membership     *utils.MembershipList
 	network        *utils.NetworkLayer
@@ -121,12 +121,12 @@ func NewController(config utils.Config) (*Controller, error) {
 	}
 
 	suspicionMgr := utils.NewSuspicionManager(membership, network, opts)
-	// gossipManager := NewGossipManager(membership, network, suspicionMgr)
+	// gossipManager := detectors.NewGossipManager(membership, network, suspicionMgr)
 	pingAckManager := detectors.NewPingAckManager(membership, network, suspicionMgr)
 
 	controller := &Controller{
 		mode: config.Mode,
-		// gossipManager: gossipManager,
+		// gossipManager: detectors.gossipManager,
 		pingAckManager: pingAckManager,
 		membership:     membership,
 		network:        network,
