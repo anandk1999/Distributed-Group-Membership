@@ -1,93 +1,165 @@
-# MP2-G02
+# Distributed Membership & Failure Detection (SWIM-Inspired)
 
+A lightweight, extensible group membership and failure detection system written in Go.  
+Implements a SWIM-style protocol with a pluggable detection mode (currently a Ping/Ack variant; Gossip stubbed for extension), suspicion propagation, piggybacked membership updates, and operational tooling for live cluster introspection.
 
+---
 
-## Getting started
+## Core Features
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+- Membership tracking with incarnation numbers  
+- Failure detection via randomized periodic Ping/Ack probing (`PingAckMode`)  
+- Suspicion phase before declaring failure using a tunable multi-report policy ([`utils.SuspicionManager`](utils/suspicion.go))  
+- Piggyback dissemination of recent membership deltas ([`utils.MembershipList.AddRecentUpdate`](utils/membership.go))  
+- Structured statuses: Alive → Suspected → Failed ([`utils.MemberStatus`](utils/types.go))  
+- Time–bounded retention of confirmed failures  
+- Local HTTP control server for safe automation ([`NewControlServer`](main.go))  
+- Interactive CLI ticker summarizing membership health ([`StartCLI`](main.go))  
+- Remote / local monitoring script: `scripts/monitor_node.sh`  
+- Network abstraction with handler registry & artificial drop-rate injection ([`utils.NetworkLayer`](utils/network.go))  
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+---
 
-## Add your files
+## Architecture Overview
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+Component | Responsibility
+--------- | --------------
+Controller ([`Controller`](main.go)) | Orchestrates network, detector mode, suspicion manager
+Network Layer ([`utils.NetworkLayer`](utils/network.go)) | UDP messaging, handler dispatch, bounded queue
+Membership Store ([`utils.MembershipList`](utils/membership.go)) | Thread-safe state, random peer sampling, update window
+Failure Detection ([`detectors.PingAckManager`](detectors/pingack.go)) | Periodic direct + indirect probes, ACK correlation
+Suspicion Manager ([`utils.SuspicionManager`](utils/suspicion.go)) | Aggregates suspicion reports, escalates to failure
+CLI / Control Plane | HTTP endpoints + periodic status logging
+Scripts | Cluster ops (log generation, monitoring)
+
+Data flow (Ping/Ack):
+1. Periodic selection of a random target
+2. Direct ping → wait for ACK
+3. On timeout: indirect probes via k helper nodes
+4. On continued silence: declare Suspected ([`PingAckManager.declareSuspicion`](detectors/pingack.go))
+5. Suspicion reports aggregated → promote to Failed after timeout or quorum
+6. Updates piggybacked onto outgoing protocol messages
+
+---
+
+## Getting Started
+
+### Build
+```
+go build -o mp2-node .
+```
+
+### Run (single node introducer)
+```
+./mp2-node -port 8080 -is-introducer
+```
+
+### Join from another node
+```
+./mp2-node -port 8081 -introducer 127.0.0.1:8080
+```
+
+### Control Commands (local HTTP)
+```
+./mp2-node -cmd list_mem
+./mp2-node -cmd list_self
+./mp2-node -cmd display_suspects
+```
+
+### Monitoring (live suspicion events)
+```
+./scripts/monitor_node.sh localhost 8080
+```
+
+---
+
+## Command-Line Flags (subset)
+
+Flag | Description
+---- | -----------
+`-port` | UDP listen port (default 8080)
+`-introducer` | Introducer ip:port to join
+`-is-introducer` | Start as seed node
+`-mode` | `gossip` (stub) or `pingack`
+`-cmd` | One-off control client command
+`-control-port` | Override local HTTP control port (defaults to port+10000)
+`-foreground` | Skip daemonization
+
+---
+
+## HTTP Control Endpoints
+
+Endpoint | Purpose
+-------- | -------
+`/list_mem` | Current membership view
+`/list_self` | Local node identity
+`/display_suspects` | Active suspicion entries
+`/join?introducer=IP:PORT` | Force join
+`/leave` | Voluntary leave (graceful)
+`/switch` | Switch detection mode / suspicion toggle (future extension)
+`/display_protocol` | Active mode
+
+Served on `127.0.0.1:<control-port>`.
+
+---
+
+## Status Lifecycle
+
+State | Trigger | Notes
+----- | ------- | -----
+Alive | Heartbeats / pings observed | Normal operation
+Suspected | Timeout & insufficient ACKs | `SuspicionTimeout`, quorum-based escalation
+Failed | Suspicion confirmed | Retained temporarily for convergence
+
+See [`PingAckManager.performSWIMProtocolPeriod`](detectors/pingack.go) and [`SuspicionManager.loop`](utils/suspicion.go).
+
+---
+
+## Design Choices
+
+- Incarnation numbering avoids stale overwrites
+- Indirect probing reduces false positives under transient network loss
+- Batching: recent updates window limits redundant payload growth
+- Separation of suspicion vs. failure lowers incorrect failure declarations
+- Deterministic local-only control API avoids exposing cluster mutation externally
+
+---
+
+## Extensibility Roadmap
+
+- Activate full gossip-based dissemination engine
+- Adaptive probe intervals based on recent stability
+- Metrics / Prometheus exporter
+- Encryption / Auth for control plane
+- Pluggable transport (QUIC / TCP fallback)
+
+---
+
+## Development & Testing
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.engr.illinois.edu/saik2/mp2-g02.git
-git branch -M main
-git push -uf origin main
+go vet ./...
+go test ./...   # (Add tests; current suite minimal)
 ```
 
-## Integrate with your tools
+Simulate packet loss (future flag hook):
+- Introduce adjustable drop rate in `NetworkLayer`.
 
-- [ ] [Set up project integrations](https://gitlab.engr.illinois.edu/saik2/mp2-g02/-/settings/integrations)
+---
 
-## Collaborate with your team
+## Repository Scripts
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Script | Description
+------ | -----------
+`scripts/log_generator.sh` | Generate large logs across hosts
+`scripts/monitor_node.sh` | Interactive suspicion dashboard
 
-## Test and Deploy
+---
 
-Use the built-in continuous integration in GitLab.
+## Key Source References
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- Controller startup: [`Controller.Start`](main.go)
+- Membership lifecycle: [`MembershipList`](utils/membership.go)
+- Failure detection loop: [`PingAckManager.performSWIMProtocolPeriod`](detectors/pingack.go)
+- Suspicion escalation: [`SuspicionManager`](utils/suspicion.go)
+- Types & statuses: [`Member`, `MemberStatus`](utils/types.go)
