@@ -28,7 +28,7 @@ ssh "$REMOTE_USER@$INTRODUCER" "
         echo 'Port $PORT already in use on $INTRODUCER - skipping'
     else
         cd mp2-g02
-        nohup ./mp2-node -port $PORT -is-introducer -mode pingack > node.log 2>&1 &
+        nohup ./mp2-node -port $PORT -is-introducer -mode pingack -foreground > node.log 2>&1 &
         echo 'Started introducer on $INTRODUCER'
     fi
 " &
