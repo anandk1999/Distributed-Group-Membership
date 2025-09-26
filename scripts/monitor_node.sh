@@ -68,7 +68,7 @@ else
                     [ -n \"\$TAIL_PID\" ] && kill \$TAIL_PID 2>/dev/null
                     break
                     ;;
-                'list_mem'|'list_self'|'display_suspects'|'display_protocol')
+                'list_mem'|'list_self'|'display_suspects'|'display_protocol'|'join'|'leave'|'switch')
                     ./mp2-node -cmd \"\$cmd\"
                     ;;
                 'help'|'')
