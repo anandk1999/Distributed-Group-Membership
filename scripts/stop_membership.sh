@@ -8,15 +8,15 @@ REMOTE_USER="${REMOTE_USER:-saik2}"
 
 HOSTS_FILE="../hosts.txt"
 
-echo "🛑 Stopping all membership nodes..."
+echo "Stopping all membership nodes..."
 
 for HOST in $(cat "$HOSTS_FILE"); do
   if [ -n "$HOST" ]; then
     (
-      echo "🛑 Stopping nodes on $HOST"
+      echo "Stopping nodes on $HOST"
       ssh -T "$REMOTE_USER@$HOST" "
         pkill -f mp2-node || true
-        echo '✅ Stopped all mp2-node processes on $HOST'
+        echo 'Stopped all mp2-node processes on $HOST'
         exit
       "
     ) &
@@ -24,4 +24,4 @@ for HOST in $(cat "$HOSTS_FILE"); do
 done < "$HOSTS_FILE"
 
 wait
-echo "✅ All nodes stopped!"
+echo "All nodes stopped!"

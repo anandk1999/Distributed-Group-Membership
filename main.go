@@ -61,6 +61,8 @@ func NewController(config utils.Config) (*Controller, error) {
 			for _, r := range recipients {
 				network.Send(msg, r.Address())
 			}
+			// Immediate stdout signal on suspecting node terminal
+			fmt.Printf("SUSPECT: target=%s inc=%d reporters=%v by=%s\n", target, inc, reporters, membership.LocalNode)
 			log.Printf("[OnSuspect] %s inc=%d reporters=%v", target, inc, reporters)
 		},
 		OnConfirm: func(target utils.NodeID, inc int32) {
@@ -293,7 +295,6 @@ func (c *Controller) LeaveGroup() {
 	case utils.PingAckMode:
 		c.pingAckManager.LeaveGroup()
 	case utils.GossipMode:
-		// TODO: implement when gossip is available\
 		// c.gossipManager.LeaveGroup()
 	}
 }
@@ -497,7 +498,7 @@ func (cs *ControlServer) handleSwitch(w http.ResponseWriter, r *http.Request) {
 
 func (cs *ControlServer) handleDisplayProtocol(w http.ResponseWriter, r *http.Request) {
 	mech, susp := cs.controller.GetProtocol()
-	fmt.Fprintf(w, "Protocol being used is %s with %s\n", mech, susp)
+	fmt.Fprintf(w, "(%s, %s\n)", mech, susp)
 }
 
 func runClient(cmd string, controlPort int, arg1, arg2 string) {
