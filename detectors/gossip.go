@@ -34,7 +34,7 @@ func NewGossipManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspici
 		enableSuspicion: false,
 		active:          true,
 		failureTimeout:  3 * time.Second, // 3 second detection time
-		cleanupTimeout:  6 * time.Second, // 6 second completeness time
+		cleanupTimeout:  3 * time.Second, // 6 second completeness time
 	}
 }
 
@@ -141,25 +141,24 @@ func (g *GossipManager) checkFailures() {
 		}
 
 		// Check if member hasn't been heard from in failureTimeout
-		if now.Sub(member.LastHeartbeat) > g.failureTimeout {
+		if !g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.failureTimeout+g.cleanupTimeout {
+			// No suspicion - mark as failed immediately
+			toRemove = append(toRemove, cloneGossipMember(member))
+			delete(g.membership.Members, id)
+			failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
+			g.membership.AddRecentUpdate(failedUpdate)
+			log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
+		}
+		if g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.failureTimeout {
 			if member.Status == utils.Alive {
 				// First time detecting failure - mark as suspected
-				if g.enableSuspicion {
-					member.Status = utils.Suspected
-					member.SuspicionStart = now
-					g.membership.AddRecentUpdate(member)
-					log.Printf("GOSSIP: Marked %s as SUSPECTED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
-				} else {
-					// No suspicion - mark as failed immediately
-					toRemove = append(toRemove, cloneGossipMember(member))
-					delete(g.membership.Members, id)
-					failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
-					g.membership.AddRecentUpdate(failedUpdate)
-					log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
-				}
+				member.Status = utils.Suspected
+				member.SuspicionStart = now
+				g.membership.AddRecentUpdate(member)
+				log.Printf("GOSSIP: Marked %s as SUSPECTED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
 			} else if member.Status == utils.Suspected {
 				// Already suspected, check if we should confirm failure
-				if now.Sub(member.SuspicionStart) > g.cleanupTimeout {
+				if now.Sub(member.SuspicionStart) > g.suspicionMgr.GetTimeout() {
 					toRemove = append(toRemove, cloneGossipMember(member))
 					delete(g.membership.Members, id)
 					failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
@@ -212,7 +211,7 @@ func (g *GossipManager) handleHeartbeat(msg utils.Message, from *net.UDPAddr) {
 		// Update existing member
 		updated := false
 		if msg.Incarnation > sender.Incarnation {
-			// Higher incarnation - this is a rejoin
+			// Update status of sender in own membership list
 			oldStatus := sender.Status
 			sender.Incarnation = msg.Incarnation
 			sender.Status = utils.Alive

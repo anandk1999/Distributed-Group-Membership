@@ -20,8 +20,8 @@ import (
 )
 
 type Controller struct {
-	mode utils.DetectionMode
-	// gossipManager  *detectors.GossipManager
+	mode           utils.DetectionMode
+	gossipManager  *detectors.GossipManager
 	pingAckManager *detectors.PingAckManager
 	membership     *utils.MembershipList
 	network        *utils.NetworkLayer
@@ -123,12 +123,12 @@ func NewController(config utils.Config) (*Controller, error) {
 	}
 
 	suspicionMgr := utils.NewSuspicionManager(membership, network, opts)
-	// gossipManager := detectors.NewGossipManager(membership, network, suspicionMgr)
+	gossipManager := detectors.NewGossipManager(membership, network, suspicionMgr)
 	pingAckManager := detectors.NewPingAckManager(membership, network, suspicionMgr)
 
 	controller := &Controller{
-		mode: config.Mode,
-		// gossipManager: detectors.gossipManager,
+		mode:           config.Mode,
+		gossipManager:  gossipManager,
 		pingAckManager: pingAckManager,
 		membership:     membership,
 		network:        network,
@@ -150,7 +150,7 @@ func (c *Controller) Start() error {
 	// Start based on mode
 	switch c.mode {
 	case utils.GossipMode:
-		// c.gossipManager.Start()
+		c.gossipManager.Start()
 	case utils.PingAckMode:
 		c.pingAckManager.Start()
 	}
@@ -163,7 +163,7 @@ func (c *Controller) Start() error {
 func (c *Controller) JoinGroup(introducerAddr string) error {
 	switch c.mode {
 	case utils.GossipMode:
-		// return c.gossipManager.JoinGroup(introducerAddr)
+		return c.gossipManager.JoinGroup(introducerAddr)
 	case utils.PingAckMode:
 		return c.pingAckManager.JoinGroup(introducerAddr)
 	}
@@ -174,7 +174,7 @@ func (c *Controller) Stop() {
 	// Stop managers & network
 	switch c.mode {
 	case utils.GossipMode:
-		// c.gossipManager.Stop()
+		c.gossipManager.Stop()
 	case utils.PingAckMode:
 		c.pingAckManager.Stop()
 	}
@@ -251,9 +251,9 @@ func (c *Controller) SwitchMode(mode utils.DetectionMode) {
 	switch mode {
 	case utils.GossipMode:
 		c.pingAckManager.Stop()
-		// c.gossipManager.Start()
+		c.gossipManager.Start()
 	case utils.PingAckMode:
-		// c.gossipManager.Stop()
+		c.gossipManager.Stop()
 		c.pingAckManager.Start()
 	}
 }
@@ -264,7 +264,7 @@ func (c *Controller) SetSuspicion(enable bool) {
 	case utils.PingAckMode:
 		c.pingAckManager.SetSuspicion(enable)
 	case utils.GossipMode:
-		// c.gossipManager.SetSuspicion(enable)
+		c.gossipManager.SetSuspicion(enable)
 	}
 }
 
@@ -281,11 +281,11 @@ func (c *Controller) GetProtocol() (string, string) {
 	}
 	if c.mode == utils.GossipMode {
 		mech = "gossip"
-		// if c.gossipManager != nil {
-		// 	if c.gossipManager.SuspicionEnabled() {
-		// 		suspect = "suspect"
-		// 	}
-		// }
+		if c.gossipManager != nil {
+			if c.gossipManager.SuspicionEnabled() {
+				suspect = "suspect"
+			}
+		}
 	}
 	return mech, suspect
 }
@@ -295,7 +295,7 @@ func (c *Controller) LeaveGroup() {
 	case utils.PingAckMode:
 		c.pingAckManager.LeaveGroup()
 	case utils.GossipMode:
-		// c.gossipManager.LeaveGroup()
+		c.gossipManager.LeaveGroup()
 	}
 }
 

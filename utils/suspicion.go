@@ -295,3 +295,7 @@ func (sm *SuspicionManager) reportersList(e *suspectEntry) []NodeID {
 	}
 	return out
 }
+
+func (sm *SuspicionManager) GetTimeout() time.Duration {
+	return sm.opts.SuspicionTimeout
+}
