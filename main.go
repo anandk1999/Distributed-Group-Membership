@@ -35,7 +35,7 @@ func NewController(config utils.Config) (*Controller, error) {
 		SuspicionTimeout:   2 * time.Second,
 		CheckInterval:      200 * time.Millisecond,
 		RequireReports:     1,
-		ConfirmedRetention: 30 * time.Second,
+		ConfirmedRetention: 3 * time.Second,
 		OnSuspect: func(target utils.NodeID, inc int32, reporters []utils.NodeID) {
 			membership.Lock()
 			if m, ok := membership.Members[target.String()]; ok {

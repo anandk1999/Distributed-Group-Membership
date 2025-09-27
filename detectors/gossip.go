@@ -34,7 +34,7 @@ func NewGossipManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspici
 		enableSuspicion: false,
 		active:          true,
 		failureTimeout:  3 * time.Second, // 3 second detection time
-		cleanupTimeout:  3 * time.Second, // 6 second completeness time
+		cleanupTimeout:  3 * time.Second, // 3 second completeness time
 	}
 }
 

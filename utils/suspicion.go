@@ -39,7 +39,7 @@ type SuspicionManager struct {
 
 func NewSuspicionManager(m *MembershipList, n *NetworkLayer, opts Options) *SuspicionManager {
 	if opts.SuspicionTimeout == 0 {
-		opts.SuspicionTimeout = 2500 * time.Millisecond
+		opts.SuspicionTimeout = 2 * time.Second
 	}
 	if opts.CheckInterval == 0 {
 		opts.CheckInterval = 200 * time.Millisecond
@@ -49,7 +49,7 @@ func NewSuspicionManager(m *MembershipList, n *NetworkLayer, opts Options) *Susp
 	}
 	// default confirmed retention 30s if not set
 	if opts.ConfirmedRetention == 0 {
-		opts.ConfirmedRetention = 30 * time.Second
+		opts.ConfirmedRetention = 3 * time.Second
 	}
 
 	return &SuspicionManager{
