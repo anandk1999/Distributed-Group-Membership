@@ -155,7 +155,7 @@ func (g *GossipManager) checkFailures() {
 				member.Status = utils.Suspected
 				member.SuspicionStart = now
 				g.membership.AddRecentUpdate(member)
-				// log.Printf("GOSSIP: Marked %s as SUSPECTED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
+				log.Printf("GOSSIP: Marked %s as SUSPECTED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
 			} else if member.Status == utils.Suspected {
 				// Already suspected, check if we should confirm failure
 				if now.Sub(member.SuspicionStart) > g.suspicionMgr.GetTimeout() {
