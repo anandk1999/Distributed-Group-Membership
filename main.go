@@ -498,7 +498,7 @@ func (cs *ControlServer) handleSwitch(w http.ResponseWriter, r *http.Request) {
 
 func (cs *ControlServer) handleDisplayProtocol(w http.ResponseWriter, r *http.Request) {
 	mech, susp := cs.controller.GetProtocol()
-	fmt.Fprintf(w, "(%s, %s\n)", mech, susp)
+	fmt.Fprintf(w, "(%s, %s)", mech, susp)
 }
 
 func runClient(cmd string, controlPort int, arg1, arg2 string) {
