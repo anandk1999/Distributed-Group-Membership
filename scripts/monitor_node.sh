@@ -17,8 +17,10 @@ echo "----------------------------------------"
 
 # Start background process to show suspects from log
 if [ -f "node.log" ]; then
-    # Show SUSPECT, FAILED, CLEARED events and member joins/leaves
-    tail -F node.log 2>/dev/null | grep --line-buffered "SUSPECT\|FAILED\|CLEARED\|joined\|left\|New member" &
+    # Show SUSPECT, FAILED, CLEARED events and member joins/leaves (deduplicated)
+    tail -F node.log 2>/dev/null | \
+        grep --line-buffered -E "(SUSPECT|FAILED|CLEARED|joined|left|New member)" | \
+        uniq &
     TAIL_PID=$!
 fi
 
