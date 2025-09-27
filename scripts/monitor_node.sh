@@ -99,7 +99,7 @@ while true; do
         *)
             # Forward the command to the actual application
             if [ -n "$line" ]; then
-                echo "$line" | nc localhost "$PORT" 2>/dev/null || echo "Error: Could not connect to node on port $PORT"
+               ./mp2-node -cmd "$cmd" "${tokens[@]}" || echo "Error: Could not connect to node on port $PORT"
             fi
             ;;
     esac
