@@ -133,24 +133,31 @@ func (sm *SuspicionManager) ProcessSuspicion(reporter NodeID, target NodeID, inc
 
 	e.reporters[reporter] = now
 
-	if len(e.reporters) >= sm.opts.RequireReports && e.firstReport.IsZero() {
+	shouldTransitionToSuspected := len(e.reporters) >= sm.opts.RequireReports && e.firstReport.IsZero()
+	if shouldTransitionToSuspected {
 		e.firstReport = now
+	}
 
-		sm.mu.Unlock()
+	// Get reporters list while still holding lock if needed for callback
+	var reporters []NodeID
+	if shouldTransitionToSuspected && sm.opts.OnSuspect != nil {
+		reporters = sm.reportersList(e)
+	}
+	sm.mu.Unlock()
+
+	if shouldTransitionToSuspected {
 		sm.membership.Lock()
 		m := sm.membership.Members[target.String()]
 		if m != nil {
 			m.Status = Suspected
-			m.SuspicionStart = e.firstReport
+			m.SuspicionStart = now
 		}
 		sm.membership.Unlock()
 
 		if sm.opts.OnSuspect != nil {
-			go sm.opts.OnSuspect(target, inc, sm.reportersList(e))
+			go sm.opts.OnSuspect(target, inc, reporters)
 		}
-		return
 	}
-	sm.mu.Unlock()
 }
 
 func (sm *SuspicionManager) ClearSuspect(target NodeID, inc int32) {
@@ -275,15 +282,23 @@ func (sm *SuspicionManager) check(now time.Time) {
 	}
 	sm.mu.Unlock()
 
-	for _, c := range toConfirm {
+	// Apply all membership status changes atomically
+	if len(toConfirm) > 0 {
 		sm.membership.Lock()
-		if m := sm.membership.Members[c.target.String()]; m != nil {
-			m.Status = Failed
+		var confirmedMembers []confirmAction
+		for _, c := range toConfirm {
+			if m := sm.membership.Members[c.target.String()]; m != nil {
+				m.Status = Failed
+				confirmedMembers = append(confirmedMembers, c)
+			}
 		}
 		sm.membership.Unlock()
 
-		if sm.opts.OnConfirm != nil {
-			go sm.opts.OnConfirm(c.target, c.inc)
+		// Call callbacks outside the lock
+		for _, c := range confirmedMembers {
+			if sm.opts.OnConfirm != nil {
+				go sm.opts.OnConfirm(c.target, c.inc)
+			}
 		}
 	}
 }

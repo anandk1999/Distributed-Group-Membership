@@ -116,10 +116,42 @@ func ParseMode(mode string) DetectionMode {
 	return GossipMode
 }
 
+// TimeoutConfig contains all timeout-related configuration
+type TimeoutConfig struct {
+	// Failure detection timeouts
+	FailureTimeout   time.Duration // Time before marking as suspected/failed
+	CleanupTimeout   time.Duration // Additional time before removal (gossip only)
+	SuspicionTimeout time.Duration // Time before confirming failure
+
+	// Protocol-specific timeouts
+	GossipPeriod   time.Duration // How often to gossip
+	ProtocolPeriod time.Duration // SWIM protocol period (pingack)
+	AckTimeout     time.Duration // Time to wait for direct ACK
+
+	// Maintenance intervals
+	CheckInterval time.Duration // How often to check for failures
+}
+
+// DefaultTimeoutConfig returns a configuration with harmonized timeout values
+func DefaultTimeoutConfig() TimeoutConfig {
+	return TimeoutConfig{
+		FailureTimeout:   3 * time.Second, // Standard failure detection time
+		CleanupTimeout:   2 * time.Second, // Additional cleanup time for gossip
+		SuspicionTimeout: 2 * time.Second, // Time to confirm suspicions
+
+		GossipPeriod:   1 * time.Second,        // Gossip every second
+		ProtocolPeriod: 2 * time.Second,        // SWIM period
+		AckTimeout:     500 * time.Millisecond, // Quick ACK timeout
+
+		CheckInterval: 200 * time.Millisecond, // Frequent checks
+	}
+}
+
 // Config represents configuration for initializing a node
 type Config struct {
 	NodeID         NodeID
 	IntroducerAddr string
 	IsIntroducer   bool
 	Mode           DetectionMode
+	Timeouts       TimeoutConfig
 }

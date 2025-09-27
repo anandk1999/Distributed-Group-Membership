@@ -132,6 +132,7 @@ func (ml *MembershipList) GetRecentUpdates(limit int) []MemberUpdate {
 	return filtered[:limit]
 }
 
+// AddRecentUpdate adds a recent update. Caller must hold the lock.
 func (ml *MembershipList) AddRecentUpdate(member *Member) {
 	update := MemberUpdate{
 		NodeID:      member.ID,
@@ -140,6 +141,13 @@ func (ml *MembershipList) AddRecentUpdate(member *Member) {
 		Timestamp:   time.Now(),
 	}
 	ml.recentUpdates = append(ml.recentUpdates, update)
+}
+
+// AddRecentUpdateSafe is a thread-safe version of AddRecentUpdate
+func (ml *MembershipList) AddRecentUpdateSafe(member *Member) {
+	ml.Lock()
+	defer ml.Unlock()
+	ml.AddRecentUpdate(member)
 }
 
 func (ml *MembershipList) GetAllMembers() []*Member {

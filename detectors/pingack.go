@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"mp2-g02/utils"
@@ -18,46 +19,68 @@ type pendingPing struct {
 	ackReceived  chan bool
 }
 
+type indirectPingWaiter struct {
+	requester   utils.NodeID
+	ch          chan int32
+	ctx         context.Context
+	cancel      context.CancelFunc
+	createdTime time.Time
+}
+
 type PingAckManager struct {
 	membership      *utils.MembershipList
 	network         *utils.NetworkLayer
-	protocolPeriod  time.Duration
-	ackTimeout      time.Duration
 	k               int
-	suspicionTime   time.Duration
-	failureTime     time.Duration
 	stopped         chan bool
 	suspicionMgr    *utils.SuspicionManager
 	seqNum          uint64
 	pendingAcks     map[uint64]*pendingPing
-	pendingIndirect map[string]*struct {
-		requester utils.NodeID
-		ch        chan int32
-	}
+	pendingIndirect map[string]*indirectPingWaiter
 	enableSuspicion bool
 	mu              sync.Mutex
 	active          bool
+	// Context for cleanup
+	ctx    context.Context
+	cancel context.CancelFunc
+	// Timeout configuration
+	timeouts utils.TimeoutConfig
 }
 
 func NewPingAckManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspicionMgr *utils.SuspicionManager) *PingAckManager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &PingAckManager{
-		membership:     ml,
-		network:        net,
-		protocolPeriod: 2 * time.Second,
-		ackTimeout:     500 * time.Millisecond,
-		k:              5,
-		suspicionTime:  1 * time.Second,
-		failureTime:    2 * time.Second,
-		stopped:        make(chan bool),
-		suspicionMgr:   suspicionMgr,
-		seqNum:         0,
-		pendingAcks:    make(map[uint64]*pendingPing),
-		pendingIndirect: make(map[string]*struct {
-			requester utils.NodeID
-			ch        chan int32
-		}),
+		membership:      ml,
+		network:         net,
+		k:               5,
+		stopped:         make(chan bool),
+		suspicionMgr:    suspicionMgr,
+		seqNum:          0,
+		pendingAcks:     make(map[uint64]*pendingPing),
+		pendingIndirect: make(map[string]*indirectPingWaiter),
 		enableSuspicion: false,
 		active:          true,
+		ctx:             ctx,
+		cancel:          cancel,
+		timeouts:        utils.DefaultTimeoutConfig(),
+	}
+}
+
+func NewPingAckManagerWithTimeouts(ml *utils.MembershipList, net *utils.NetworkLayer, suspicionMgr *utils.SuspicionManager, timeouts utils.TimeoutConfig) *PingAckManager {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &PingAckManager{
+		membership:      ml,
+		network:         net,
+		k:               5,
+		stopped:         make(chan bool),
+		suspicionMgr:    suspicionMgr,
+		seqNum:          0,
+		pendingAcks:     make(map[uint64]*pendingPing),
+		pendingIndirect: make(map[string]*indirectPingWaiter),
+		enableSuspicion: false,
+		active:          true,
+		ctx:             ctx,
+		cancel:          cancel,
+		timeouts:        timeouts,
 	}
 }
 
@@ -74,11 +97,13 @@ func (p *PingAckManager) Start() {
 
 	go p.pingLoop()
 	go p.failureDetectionLoop()
+	go p.cleanupLoop()
 
 	log.Println("PingAck manager started")
 }
 
 func (p *PingAckManager) Stop() {
+	p.cancel() // Cancel context to cleanup goroutines
 	close(p.stopped)
 }
 
@@ -91,7 +116,7 @@ func (p *PingAckManager) SuspicionEnabled() bool {
 }
 
 func (p *PingAckManager) pingLoop() {
-	ticker := time.NewTicker(p.protocolPeriod)
+	ticker := time.NewTicker(p.timeouts.ProtocolPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -99,9 +124,7 @@ func (p *PingAckManager) pingLoop() {
 		case <-p.stopped:
 			return
 		case <-ticker.C:
-			if p.active {
-				p.performSWIMProtocolPeriod()
-			}
+			p.performSWIMProtocolPeriod()
 		}
 	}
 }
@@ -148,7 +171,7 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 		log.Printf("Failed to send direct ping to %s: %v", target.ID, err)
 	}
 
-	directAckTimer := time.NewTimer(p.ackTimeout)
+	directAckTimer := time.NewTimer(p.timeouts.AckTimeout)
 	defer directAckTimer.Stop()
 
 	select {
@@ -194,7 +217,7 @@ func (p *PingAckManager) performSWIMProtocolPeriod() {
 		}
 	}
 
-	remainingTimeout := p.protocolPeriod - p.ackTimeout
+	remainingTimeout := p.timeouts.ProtocolPeriod - p.timeouts.AckTimeout
 	indirectAckTimer := time.NewTimer(remainingTimeout)
 	defer indirectAckTimer.Stop()
 
@@ -317,7 +340,7 @@ func (p *PingAckManager) processUpdate(update utils.MemberUpdate, reporter utils
 }
 
 func (p *PingAckManager) failureDetectionLoop() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(p.timeouts.CheckInterval)
 	defer ticker.Stop()
 
 	for {
@@ -330,26 +353,90 @@ func (p *PingAckManager) failureDetectionLoop() {
 	}
 }
 
+func (p *PingAckManager) cleanupLoop() {
+	// Cleanup orphaned entries every 5 seconds
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopped:
+			return
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			p.cleanupOrphanedEntries()
+		}
+	}
+}
+
+func (p *PingAckManager) cleanupOrphanedEntries() {
+	now := time.Now()
+	var toCleanup []string
+
+	p.mu.Lock()
+	// Collect entries that are older than 2 * AckTimeout (should be enough for any reasonable operation)
+	maxAge := 2 * p.timeouts.AckTimeout
+
+	for key, waiter := range p.pendingIndirect {
+		select {
+		case <-waiter.ctx.Done():
+			// Context was cancelled, entry should be cleaned up
+			toCleanup = append(toCleanup, key)
+		default:
+			// Check if this entry is too old (fallback cleanup)
+			if now.Sub(waiter.createdTime) > maxAge {
+				toCleanup = append(toCleanup, key)
+			}
+		}
+	}
+
+	// Remove the orphaned entries
+	for _, key := range toCleanup {
+		if waiter, exists := p.pendingIndirect[key]; exists {
+			waiter.cancel() // Ensure context is cancelled
+			delete(p.pendingIndirect, key)
+		}
+	}
+	p.mu.Unlock()
+
+	if len(toCleanup) > 0 {
+		log.Printf("Cleaned up %d orphaned pendingIndirect entries", len(toCleanup))
+	}
+}
+
 func (p *PingAckManager) checkFailures() {
 	now := time.Now()
 	var toRemove []*utils.Member
+	var failureUpdates []*utils.Member
 
 	p.membership.Lock()
+	// First pass - collect all changes without modifying the map
 	for id, member := range p.membership.Members {
 		if id == p.membership.LocalNode.String() {
 			continue
 		}
 
 		if member.Status == utils.Suspected {
-			if now.Sub(member.SuspicionStart) > p.failureTime {
+			if now.Sub(member.SuspicionStart) > p.timeouts.SuspicionTimeout {
 				toRemove = append(toRemove, cloneMember(member))
-				delete(p.membership.Members, id)
 				failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
-				p.membership.AddRecentUpdate(failedUpdate)
+				failureUpdates = append(failureUpdates, failedUpdate)
 			}
 		}
 	}
+
+	// Second pass - apply all changes atomically (but add updates outside lock)
+	for _, member := range toRemove {
+		delete(p.membership.Members, member.ID.String())
+	}
+
 	p.membership.Unlock()
+
+	// Add updates outside the lock to avoid deadlock
+	for _, update := range failureUpdates {
+		p.membership.AddRecentUpdateSafe(update)
+	}
 
 	for _, m := range toRemove {
 		log.Printf("Declared %s as FAILED", m.ID)
@@ -498,10 +585,14 @@ func (p *PingAckManager) handleIndirectPing(msg utils.Message, from *net.UDPAddr
 	p.membership.Unlock()
 
 	key := fmt.Sprintf("%d|%s", msg.SeqNum, msg.Target.String())
-	w := &struct {
-		requester utils.NodeID
-		ch        chan int32
-	}{requester: msg.Sender, ch: make(chan int32, 1)}
+	ctx, cancel := context.WithCancel(p.ctx)
+	w := &indirectPingWaiter{
+		requester:   msg.Sender,
+		ch:          make(chan int32, 1),
+		ctx:         ctx,
+		cancel:      cancel,
+		createdTime: time.Now(),
+	}
 	p.mu.Lock()
 	p.pendingIndirect[key] = w
 	p.mu.Unlock()
@@ -523,13 +614,11 @@ func (p *PingAckManager) handleIndirectPing(msg utils.Message, from *net.UDPAddr
 		log.Printf("Failed to send proxy PING to %s: %v", msg.Target, err)
 	}
 
-	go func(waitKey string, waiter *struct {
-		requester utils.NodeID
-		ch        chan int32
-	}) {
-		t := time.NewTimer(p.ackTimeout)
+	go func(waitKey string, waiter *indirectPingWaiter, cancelCtx context.Context) {
+		t := time.NewTimer(p.timeouts.AckTimeout)
 		defer t.Stop()
 		defer func() {
+			waiter.cancel() // Cancel the context when done
 			p.mu.Lock()
 			delete(p.pendingIndirect, waitKey)
 			p.mu.Unlock()
@@ -550,8 +639,10 @@ func (p *PingAckManager) handleIndirectPing(msg utils.Message, from *net.UDPAddr
 			}
 		case <-t.C:
 			log.Printf("Proxy PING timeout for %s (seq %d); no indirect ACK sent", msg.Target, msg.SeqNum)
+		case <-cancelCtx.Done():
+			log.Printf("Proxy PING for %s (seq %d) cancelled", msg.Target, msg.SeqNum)
 		}
-	}(key, w)
+	}(key, w, ctx)
 }
 
 func (p *PingAckManager) handleIndirectAck(msg utils.Message, from *net.UDPAddr) {
@@ -594,6 +685,28 @@ func (p *PingAckManager) handleJoin(msg utils.Message, from *net.UDPAddr) {
 	}
 	p.membership.Lock()
 
+	// Check for and remove any old entries with the same IP:Port but different timestamp
+	joinerAddress := msg.Sender.Address()
+	var oldEntriesToRemove []string
+	for key, member := range p.membership.Members {
+		if member.ID.Address() == joinerAddress && member.ID.Timestamp != msg.Sender.Timestamp {
+			oldEntriesToRemove = append(oldEntriesToRemove, key)
+		}
+	}
+
+	// Remove old entries before adding the new one (collect updates for later)
+	var oldFailedUpdates []*utils.Member
+	for _, key := range oldEntriesToRemove {
+		if oldMember, exists := p.membership.Members[key]; exists {
+			log.Printf("Removing old entry for rejoining node %s (old timestamp: %d, new timestamp: %d)",
+				joinerAddress, oldMember.ID.Timestamp, msg.Sender.Timestamp)
+			delete(p.membership.Members, key)
+			// Add a failed update for the old entry to propagate the removal
+			failedUpdate := &utils.Member{ID: oldMember.ID, Status: utils.Failed, Incarnation: oldMember.Incarnation}
+			oldFailedUpdates = append(oldFailedUpdates, failedUpdate)
+		}
+	}
+
 	newMember := &utils.Member{
 		ID:            msg.Sender,
 		Incarnation:   msg.Incarnation,
@@ -602,7 +715,6 @@ func (p *PingAckManager) handleJoin(msg utils.Message, from *net.UDPAddr) {
 	}
 	memberKey := msg.Sender.String()
 	p.membership.Members[memberKey] = newMember
-	p.membership.AddRecentUpdate(newMember)
 
 	members := make([]utils.MemberUpdate, 0, len(p.membership.Members))
 	for _, member := range p.membership.Members {
@@ -614,6 +726,12 @@ func (p *PingAckManager) handleJoin(msg utils.Message, from *net.UDPAddr) {
 		})
 	}
 	p.membership.Unlock()
+
+	// Add updates outside the lock to avoid deadlock
+	for _, failedUpdate := range oldFailedUpdates {
+		p.membership.AddRecentUpdateSafe(failedUpdate)
+	}
+	p.membership.AddRecentUpdateSafe(newMember)
 
 	response := utils.Message{
 		Type:        utils.JoinResponse,

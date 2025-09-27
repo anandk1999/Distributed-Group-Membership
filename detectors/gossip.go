@@ -12,15 +12,13 @@ type GossipManager struct {
 	membership      *utils.MembershipList
 	network         *utils.NetworkLayer
 	suspicionMgr    *utils.SuspicionManager
-	gossipPeriod    time.Duration
 	fanout          int
 	stopped         chan bool
 	enableSuspicion bool
 	mu              sync.Mutex
 	active          bool
-	// Failure detection parameters
-	failureTimeout time.Duration // Time to wait before declaring a node failed
-	cleanupTimeout time.Duration // Time to wait before removing failed nodes
+	// Timeout configuration
+	timeouts utils.TimeoutConfig
 }
 
 func NewGossipManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspicionMgr *utils.SuspicionManager) *GossipManager {
@@ -28,13 +26,24 @@ func NewGossipManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspici
 		membership:      ml,
 		network:         net,
 		suspicionMgr:    suspicionMgr,
-		gossipPeriod:    1 * time.Second, // Gossip every 1 second
-		fanout:          3,               // Send to 3 random nodes
+		fanout:          3, // Send to 3 random nodes
 		stopped:         make(chan bool),
 		enableSuspicion: false,
 		active:          true,
-		failureTimeout:  3 * time.Second, // 3 second detection time
-		cleanupTimeout:  3 * time.Second, // 3 second completeness time
+		timeouts:        utils.DefaultTimeoutConfig(),
+	}
+}
+
+func NewGossipManagerWithTimeouts(ml *utils.MembershipList, net *utils.NetworkLayer, suspicionMgr *utils.SuspicionManager, timeouts utils.TimeoutConfig) *GossipManager {
+	return &GossipManager{
+		membership:      ml,
+		network:         net,
+		suspicionMgr:    suspicionMgr,
+		fanout:          3,
+		stopped:         make(chan bool),
+		enableSuspicion: false,
+		active:          true,
+		timeouts:        timeouts,
 	}
 }
 
@@ -70,7 +79,7 @@ func (g *GossipManager) SuspicionEnabled() bool {
 }
 
 func (g *GossipManager) gossipLoop() {
-	ticker := time.NewTicker(g.gossipPeriod)
+	ticker := time.NewTicker(g.timeouts.GossipPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -78,9 +87,7 @@ func (g *GossipManager) gossipLoop() {
 		case <-g.stopped:
 			return
 		case <-ticker.C:
-			if g.active {
-				g.performGossipRound()
-			}
+			g.performGossipRound()
 		}
 	}
 }
@@ -115,7 +122,7 @@ func (g *GossipManager) performGossipRound() {
 }
 
 func (g *GossipManager) failureDetectionLoop() {
-	ticker := time.NewTicker(g.gossipPeriod)
+	ticker := time.NewTicker(g.timeouts.CheckInterval)
 	defer ticker.Stop()
 
 	for {
@@ -123,9 +130,7 @@ func (g *GossipManager) failureDetectionLoop() {
 		case <-g.stopped:
 			return
 		case <-ticker.C:
-			if g.active {
-				g.checkFailures()
-			}
+			g.checkFailures()
 		}
 	}
 }
@@ -133,42 +138,65 @@ func (g *GossipManager) failureDetectionLoop() {
 func (g *GossipManager) checkFailures() {
 	now := time.Now()
 	var toRemove []*utils.Member
+	var toSuspect []string
+	var failureUpdates []*utils.Member
 
 	g.membership.Lock()
+	// First pass - collect all changes without modifying the map
 	for id, member := range g.membership.Members {
 		if id == g.membership.LocalNode.String() {
 			continue
 		}
 
 		// Check if member hasn't been heard from in failureTimeout
-		if !g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.failureTimeout+g.cleanupTimeout {
+		if !g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.timeouts.FailureTimeout+g.timeouts.CleanupTimeout {
 			// No suspicion - mark as failed immediately
 			toRemove = append(toRemove, cloneGossipMember(member))
-			delete(g.membership.Members, id)
 			failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
-			g.membership.AddRecentUpdate(failedUpdate)
+			failureUpdates = append(failureUpdates, failedUpdate)
 			log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
 		}
-		if g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.failureTimeout {
+		if g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.timeouts.FailureTimeout {
 			if member.Status == utils.Alive {
 				// First time detecting failure - mark as suspected
-				member.Status = utils.Suspected
-				member.SuspicionStart = now
-				g.membership.AddRecentUpdate(member)
+				toSuspect = append(toSuspect, id)
 				// Note: OnSuspect callback will handle the logging to avoid duplication
 			} else if member.Status == utils.Suspected {
 				// Already suspected, check if we should confirm failure
 				if now.Sub(member.SuspicionStart) > g.suspicionMgr.GetTimeout() {
 					toRemove = append(toRemove, cloneGossipMember(member))
-					delete(g.membership.Members, id)
 					failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
-					g.membership.AddRecentUpdate(failedUpdate)
+					failureUpdates = append(failureUpdates, failedUpdate)
 					// Note: OnConfirm callback will handle the logging to avoid duplication
 				}
 			}
 		}
 	}
+
+	// Second pass - apply all changes atomically (collect updates to add outside lock)
+	var suspectedMembers []*utils.Member
+	for _, id := range toSuspect {
+		if member, exists := g.membership.Members[id]; exists {
+			member.Status = utils.Suspected
+			member.SuspicionStart = now
+			suspectedMembers = append(suspectedMembers, member)
+		}
+	}
+
+	for _, member := range toRemove {
+		delete(g.membership.Members, member.ID.String())
+	}
+
 	g.membership.Unlock()
+
+	// Add updates outside the lock to avoid deadlock
+	for _, member := range suspectedMembers {
+		g.membership.AddRecentUpdateSafe(member)
+	}
+
+	for _, update := range failureUpdates {
+		g.membership.AddRecentUpdateSafe(update)
+	}
 
 	// Log removed members
 	for _, m := range toRemove {
@@ -389,6 +417,28 @@ func (g *GossipManager) handleJoin(msg utils.Message, from *net.UDPAddr) {
 	}
 	g.membership.Lock()
 
+	// Check for and remove any old entries with the same IP:Port but different timestamp
+	joinerAddress := msg.Sender.Address()
+	var oldEntriesToRemove []string
+	for key, member := range g.membership.Members {
+		if member.ID.Address() == joinerAddress && member.ID.Timestamp != msg.Sender.Timestamp {
+			oldEntriesToRemove = append(oldEntriesToRemove, key)
+		}
+	}
+
+	// Remove old entries before adding the new one (collect updates for later)
+	var oldFailedUpdates []*utils.Member
+	for _, key := range oldEntriesToRemove {
+		if oldMember, exists := g.membership.Members[key]; exists {
+			log.Printf("Removing old entry for rejoining node %s (old timestamp: %d, new timestamp: %d)",
+				joinerAddress, oldMember.ID.Timestamp, msg.Sender.Timestamp)
+			delete(g.membership.Members, key)
+			// Add a failed update for the old entry to propagate the removal
+			failedUpdate := &utils.Member{ID: oldMember.ID, Status: utils.Failed, Incarnation: oldMember.Incarnation}
+			oldFailedUpdates = append(oldFailedUpdates, failedUpdate)
+		}
+	}
+
 	newMember := &utils.Member{
 		ID:            msg.Sender,
 		Incarnation:   msg.Incarnation,
@@ -397,7 +447,6 @@ func (g *GossipManager) handleJoin(msg utils.Message, from *net.UDPAddr) {
 	}
 	memberKey := msg.Sender.String()
 	g.membership.Members[memberKey] = newMember
-	g.membership.AddRecentUpdate(newMember)
 
 	// Send membership list back
 	members := make([]utils.MemberUpdate, 0, len(g.membership.Members))
@@ -410,6 +459,12 @@ func (g *GossipManager) handleJoin(msg utils.Message, from *net.UDPAddr) {
 		})
 	}
 	g.membership.Unlock()
+
+	// Add updates outside the lock to avoid deadlock
+	for _, failedUpdate := range oldFailedUpdates {
+		g.membership.AddRecentUpdateSafe(failedUpdate)
+	}
+	g.membership.AddRecentUpdateSafe(newMember)
 
 	response := utils.Message{
 		Type:        utils.JoinResponse,
