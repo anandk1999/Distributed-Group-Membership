@@ -17,7 +17,8 @@ echo "----------------------------------------"
 
 # Start background process to show suspects from log
 if [ -f "node.log" ]; then
-    tail -F node.log 2>/dev/null | grep --line-buffered "SUSPECT\|OnSuspect" &
+    # Show SUSPECT, FAILED confirmations, and OnSuspect handler output
+    tail -F node.log 2>/dev/null | grep --line-buffered "SUSPECT\|FAILED\|OnSuspect" &
     TAIL_PID=$!
 fi
 

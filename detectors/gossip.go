@@ -147,7 +147,7 @@ func (g *GossipManager) checkFailures() {
 			delete(g.membership.Members, id)
 			failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
 			g.membership.AddRecentUpdate(failedUpdate)
-			// log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
+			log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
 		}
 		if g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.failureTimeout {
 			if member.Status == utils.Alive {
@@ -163,7 +163,7 @@ func (g *GossipManager) checkFailures() {
 					delete(g.membership.Members, id)
 					failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
 					g.membership.AddRecentUpdate(failedUpdate)
-					// log.Printf("GOSSIP: Confirmed %s as FAILED (suspected for %v)", member.ID, now.Sub(member.SuspicionStart))
+					log.Printf("GOSSIP: Confirmed %s as FAILED (suspected for %v)", member.ID, now.Sub(member.SuspicionStart))
 				}
 			}
 		}
@@ -212,13 +212,13 @@ func (g *GossipManager) handleHeartbeat(msg utils.Message, from *net.UDPAddr) {
 		updated := false
 		if msg.Incarnation > sender.Incarnation {
 			// Update status of sender in own membership list
-			// oldStatus := sender.Status
+			oldStatus := sender.Status
 			sender.Incarnation = msg.Incarnation
 			sender.Status = utils.Alive
 			sender.LastHeartbeat = time.Now()
 			sender.SuspicionStart = time.Time{}
 			updated = true
-			// log.Printf("GOSSIP: Member %s rejoined with higher incarnation %d (was %d, status: %s)",msg.Sender, msg.Incarnation, sender.Incarnation, oldStatus)
+			log.Printf("GOSSIP: Member %s rejoined with higher incarnation %d (was %d, status: %s)", msg.Sender, msg.Incarnation, sender.Incarnation, oldStatus)
 		} else if msg.Incarnation == sender.Incarnation {
 			// Same incarnation - just update heartbeat
 			sender.LastHeartbeat = time.Now()
@@ -226,11 +226,11 @@ func (g *GossipManager) handleHeartbeat(msg utils.Message, from *net.UDPAddr) {
 				sender.Status = utils.Alive
 				sender.SuspicionStart = time.Time{}
 				updated = true
-				// log.Printf("GOSSIP: Member %s refuted suspicion (inc: %d)", msg.Sender, msg.Incarnation)
+				log.Printf("GOSSIP: Member %s refuted suspicion (inc: %d)", msg.Sender, msg.Incarnation)
 			}
 		} else {
 			// Lower incarnation - ignore (stale message)
-			// log.Printf("GOSSIP: Ignoring stale message from %s (inc: %d < %d)",msg.Sender, msg.Incarnation, sender.Incarnation)
+			log.Printf("GOSSIP: Ignoring stale message from %s (inc: %d < %d)", msg.Sender, msg.Incarnation, sender.Incarnation)
 		}
 		if updated {
 			g.membership.AddRecentUpdate(sender)
@@ -254,10 +254,10 @@ func (g *GossipManager) processUpdate(update utils.MemberUpdate, reporter utils.
 	// Handle self-refutation
 	if memberKey == g.membership.LocalNode.String() {
 		if update.Status == utils.Suspected && g.enableSuspicion {
-			// log.Printf("GOSSIP: Received suspicion about self from %s (inc: %d)", reporter, update.Incarnation)
+			log.Printf("GOSSIP: Received suspicion about self from %s (inc: %d)", reporter, update.Incarnation)
 			g.suspicionMgr.ProcessSuspicion(reporter, update.NodeID, update.Incarnation)
 		} else if update.Status == utils.Alive {
-			// log.Printf("GOSSIP: Received alive message about self from %s (inc: %d)", reporter, update.Incarnation)
+			log.Printf("GOSSIP: Received alive message about self from %s (inc: %d)", reporter, update.Incarnation)
 			g.suspicionMgr.ClearSuspect(update.NodeID, update.Incarnation)
 		}
 		return
@@ -279,7 +279,7 @@ func (g *GossipManager) processUpdate(update utils.MemberUpdate, reporter utils.
 		}
 		g.membership.Members[memberKey] = newMember
 		g.membership.AddRecentUpdate(newMember)
-		// log.Printf("GOSSIP: Learned about new member %s (inc: %d, status: %s) from %s", update.NodeID, update.Incarnation, update.Status, reporter)
+		log.Printf("GOSSIP: Learned about new member %s (inc: %d, status: %s) from %s", update.NodeID, update.Incarnation, update.Status, reporter)
 		g.membership.Unlock()
 		return
 	}
@@ -288,7 +288,7 @@ func (g *GossipManager) processUpdate(update utils.MemberUpdate, reporter utils.
 	updated := false
 	if update.Incarnation > member.Incarnation {
 		// Higher incarnation - accept update
-		// oldStatus := member.Status
+		oldStatus := member.Status
 		member.Incarnation = update.Incarnation
 		member.Status = update.Status
 		if update.Status == utils.Alive {
@@ -298,7 +298,7 @@ func (g *GossipManager) processUpdate(update utils.MemberUpdate, reporter utils.
 			member.SuspicionStart = time.Now()
 		}
 		updated = true
-		// log.Printf("GOSSIP: Updated member %s (inc: %d -> %d, status: %s -> %s) from %s", update.NodeID, member.Incarnation, update.Incarnation, oldStatus, update.Status, reporter)
+		log.Printf("GOSSIP: Updated member %s (inc: %d -> %d, status: %s -> %s) from %s", update.NodeID, member.Incarnation, update.Incarnation, oldStatus, update.Status, reporter)
 	} else if update.Incarnation == member.Incarnation {
 		// Same incarnation - check for status changes
 		if update.Status == utils.Alive && member.Status == utils.Suspected {
@@ -306,16 +306,16 @@ func (g *GossipManager) processUpdate(update utils.MemberUpdate, reporter utils.
 			member.LastHeartbeat = time.Now()
 			member.SuspicionStart = time.Time{}
 			updated = true
-			// log.Printf("GOSSIP: Member %s cleared suspicion (inc: %d) from %s",update.NodeID, update.Incarnation, reporter)
+			log.Printf("GOSSIP: Member %s cleared suspicion (inc: %d) from %s", update.NodeID, update.Incarnation, reporter)
 		} else if update.Status == utils.Suspected && member.Status == utils.Alive {
 			member.Status = utils.Suspected
 			member.SuspicionStart = time.Now()
 			updated = true
-			// log.Printf("GOSSIP: Member %s marked as suspected (inc: %d) from %s", update.NodeID, update.Incarnation, reporter)
+			log.Printf("GOSSIP: Member %s marked as suspected (inc: %d) from %s", update.NodeID, update.Incarnation, reporter)
 		}
 	} else {
 		// Lower incarnation - ignore
-		// log.Printf("GOSSIP: Ignoring stale update for %s (inc: %d < %d) from %s",update.NodeID, update.Incarnation, member.Incarnation, reporter)
+		log.Printf("GOSSIP: Ignoring stale update for %s (inc: %d < %d) from %s", update.NodeID, update.Incarnation, member.Incarnation, reporter)
 	}
 
 	if updated {
