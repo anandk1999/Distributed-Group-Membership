@@ -155,7 +155,7 @@ func (g *GossipManager) checkFailures() {
 				member.Status = utils.Suspected
 				member.SuspicionStart = now
 				g.membership.AddRecentUpdate(member)
-				log.Printf("GOSSIP: Marked %s as SUSPECTED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
+				// Note: OnSuspect callback will handle the logging to avoid duplication
 			} else if member.Status == utils.Suspected {
 				// Already suspected, check if we should confirm failure
 				if now.Sub(member.SuspicionStart) > g.suspicionMgr.GetTimeout() {
@@ -163,7 +163,7 @@ func (g *GossipManager) checkFailures() {
 					delete(g.membership.Members, id)
 					failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
 					g.membership.AddRecentUpdate(failedUpdate)
-					log.Printf("GOSSIP: Confirmed %s as FAILED (suspected for %v)", member.ID, now.Sub(member.SuspicionStart))
+					// Note: OnConfirm callback will handle the logging to avoid duplication
 				}
 			}
 		}
@@ -298,7 +298,10 @@ func (g *GossipManager) processUpdate(update utils.MemberUpdate, reporter utils.
 			member.SuspicionStart = time.Now()
 		}
 		updated = true
-		log.Printf("GOSSIP: Updated member %s (inc: %d -> %d, status: %s -> %s) from %s", update.NodeID, member.Incarnation, update.Incarnation, oldStatus, update.Status, reporter)
+		// Only log status changes that aren't suspect/failed (those are handled by callbacks)
+		if update.Status != utils.Suspected && update.Status != utils.Failed {
+			log.Printf("GOSSIP: Updated member %s (inc: %d -> %d, status: %s -> %s) from %s", update.NodeID, member.Incarnation, update.Incarnation, oldStatus, update.Status, reporter)
+		}
 	} else if update.Incarnation == member.Incarnation {
 		// Same incarnation - check for status changes
 		if update.Status == utils.Alive && member.Status == utils.Suspected {
@@ -311,7 +314,7 @@ func (g *GossipManager) processUpdate(update utils.MemberUpdate, reporter utils.
 			member.Status = utils.Suspected
 			member.SuspicionStart = time.Now()
 			updated = true
-			log.Printf("GOSSIP: Member %s marked as suspected (inc: %d) from %s", update.NodeID, update.Incarnation, reporter)
+			// Note: Suspicion processing will handle logging via callbacks
 		}
 	} else {
 		// Lower incarnation - ignore

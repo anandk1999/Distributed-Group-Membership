@@ -61,9 +61,7 @@ func NewController(config utils.Config) (*Controller, error) {
 			for _, r := range recipients {
 				network.Send(msg, r.Address())
 			}
-			// Immediate stdout signal on suspecting node terminal
-			fmt.Printf("SUSPECT: target=%s inc=%d reporters=%v by=%s\n", target, inc, reporters, membership.LocalNode)
-			log.Printf("[OnSuspect] %s inc=%d reporters=%v", target, inc, reporters)
+			log.Printf("SUSPECT: %s inc=%d reporters=%v", target, inc, reporters)
 		},
 		OnConfirm: func(target utils.NodeID, inc int32) {
 			membership.Lock()
@@ -89,7 +87,7 @@ func NewController(config utils.Config) (*Controller, error) {
 			for _, r := range recipients {
 				network.Send(msg, r.Address())
 			}
-			log.Printf("[OnConfirm] %s inc=%d", target, inc)
+			log.Printf("FAILED: %s inc=%d", target, inc)
 		},
 		OnClear: func(target utils.NodeID, inc int32) {
 			membership.Lock()
@@ -118,7 +116,7 @@ func NewController(config utils.Config) (*Controller, error) {
 			for _, r := range recipients {
 				network.Send(msg, r.Address())
 			}
-			log.Printf("[OnClear] %s inc=%d", target, inc)
+			log.Printf("CLEARED: %s inc=%d", target, inc)
 		},
 	}
 

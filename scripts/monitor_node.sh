@@ -12,13 +12,13 @@ PORT=${2:-8080}
 echo "Monitoring local node on port $PORT"
 echo "Commands: list_mem, list_self, display_suspects, display_protocol, join, leave, switch, quit"
 echo "You can add arguments after a command, e.g.: switch -mode gossip -interval 500ms"
-echo "SUSPECT events will appear automatically below:"
+echo "Membership events (SUSPECT/FAILED/CLEARED/joins/leaves) will appear automatically below:"
 echo "----------------------------------------"
 
 # Start background process to show suspects from log
 if [ -f "node.log" ]; then
-    # Show SUSPECT, FAILED confirmations, and OnSuspect handler output
-    tail -F node.log 2>/dev/null | grep --line-buffered "SUSPECT\|FAILED\|OnSuspect" &
+    # Show SUSPECT, FAILED, CLEARED events and member joins/leaves
+    tail -F node.log 2>/dev/null | grep --line-buffered "SUSPECT\|FAILED\|CLEARED\|joined\|left\|New member" &
     TAIL_PID=$!
 fi
 
