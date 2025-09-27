@@ -94,7 +94,7 @@ else
             if [[ -n "\$baseCmd" ]]; then
                 ./mp2-node -cmd "\$baseCmd"
             else
-                echo "Unknown command: \$cmd (try help)"
+                echo "Unknown command: \$cmd"
             fi
         done
     "
