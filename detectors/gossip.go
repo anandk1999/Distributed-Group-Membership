@@ -115,7 +115,7 @@ func (g *GossipManager) performGossipRound() {
 }
 
 func (g *GossipManager) failureDetectionLoop() {
-	ticker := time.NewTicker(500 * time.Millisecond) // Check every 500ms
+	ticker := time.NewTicker(g.gossipPeriod)
 	defer ticker.Stop()
 
 	for {
