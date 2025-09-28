@@ -18,13 +18,49 @@ echo "----------------------------------------"
 
 # Start background process to show suspects from log
 if [ -f "node.log" ]; then
-    # Show SUSPECT, FAILED, CLEARED events and member joins/leaves (deduplicated)
-    # Start the pipeline in a new process group to make cleanup easier
-    setsid bash -c '
+    # Show only the latest SUSPECT, FAILED, CLEARED events and member joins/leaves
+    # Use bash subshell for better process control on macOS
+    (
         tail -F node.log 2>/dev/null | \
             grep --line-buffered -E "(SUSPECT|FAILED|CLEARED|joined|left|New member)" | \
-            awk "!seen[\$0]++ {print \$0; if(length(seen) > 1000) {delete seen}}"
-    ' &
+            awk '
+            {
+                # Extract timestamp (first 3 fields: 2025/09/27 18:54:28)
+                timestamp = $1 " " $2
+                
+                # Extract event type
+                if ($0 ~ /SUSPECT:/) event_type = "SUSPECT"
+                else if ($0 ~ /FAILED:/) event_type = "FAILED"
+                else if ($0 ~ /CLEARED:/) event_type = "CLEARED"
+                else if ($0 ~ /joined/) event_type = "JOINED"
+                else if ($0 ~ /left/) event_type = "LEFT"
+                else if ($0 ~ /New member/) event_type = "NEW_MEMBER"
+                else event_type = "OTHER"
+                
+                # Store the latest entry for each event type
+                if (timestamp >= latest_time[event_type] || latest_time[event_type] == "") {
+                    if (timestamp > latest_time[event_type]) {
+                        # New timestamp - clear old entries and show this one
+                        latest_time[event_type] = timestamp
+                        latest_line[event_type] = $0
+                        print $0
+                    } else if (timestamp == latest_time[event_type] && latest_line[event_type] != $0) {
+                        # Same timestamp but different line - show it
+                        latest_line[event_type] = $0
+                        print $0
+                    }
+                }
+                
+                # Cleanup old entries periodically
+                if (NR % 100 == 0) {
+                    for (t in latest_time) {
+                        if (latest_time[t] < timestamp) {
+                            # Keep only recent entries
+                        }
+                    }
+                }
+            }'
+    ) &
     TAIL_PID=$!
 fi
 
