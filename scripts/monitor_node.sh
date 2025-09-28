@@ -13,7 +13,7 @@ EVENT_FILE=$(mktemp -t mp2-monitor-events.XXXXXX)
 
 # Local monitoring
 echo "Monitoring local node on port $PORT"
-echo "Commands: list_mem, list_self, display_suspects, display_protocol, join, leave, switch, show_status, show_events, quit"
+echo "Commands: list_mem, list_self, display_suspects, display_protocol, join, leave, switch, show_status, show_events, grep_logs, quit"
 echo "You can add arguments after a command, e.g.: switch -mode gossip -interval 500ms"
 echo "Membership events (SUSPECT/FAILED/CLEARED/joins/leaves) will appear automatically below:"
 echo "Note: Exact duplicate lines (including timestamp) are filtered out"
@@ -38,78 +38,97 @@ if [ -f "node.log" ]; then
             }
 
             function emit(ts, status, node, raw,   color_start, color_end, summary) {
-                color_start=""
-                color_end="\033[0m"
-                if (status == "FAILED") color_start="\033[31m"
-                else if (status == "SUSPECT") color_start="\033[33m"
-                else if (status == "CLEARED") color_start="\033[32m"
-                else if (status == "JOINED" || status == "NEW_MEMBER") color_start="\033[36m"
-                else if (status == "LEFT") color_start="\033[35m"
-                else color_end=""
+                tail -F node.log 2>/dev/null | \
+                    grep --line-buffered -E "(SUSPECT|FAILED|CLEARED|joined|left|New member|cleared suspicion)" | \
+                    awk -v state_file="$STATE_FILE" -v event_file="$EVENT_FILE" '
+        function flush_state(   node) {
+            close(state_file)
+            print "" > state_file
+            close(state_file)
+            for (node in current_state) {
+                printf "%s %s\n", node, current_state[node] >> state_file
+            }
+            close(state_file)
+        }
 
-                summary = ts " [" status "]"
-                if (node != "") {
-                    summary = summary " " node
-                }
+        function emit(ts, status, node, raw,   color_start, color_end, summary) {
+            color_start=""
+            color_end="\033[0m"
+            if (status == "FAILED") color_start="\033[31m"
+            else if (status == "SUSPECT") color_start="\033[33m"
+            else if (status == "CLEARED") color_start="\033[32m"
+            else if (status == "JOINED" || status == "NEW_MEMBER") color_start="\033[36m"
+            else if (status == "LEFT") color_start="\033[35m"
+            else color_end=""
 
-                if (color_end != "") {
-                    printf "%s%s %s%s\n", color_start, summary, raw, color_end
-                } else {
-                    printf "%s %s\n", summary, raw
-                }
-                fflush()
-
-                printf "%s %s\n", summary, raw >> event_file
-                close(event_file)
+            summary = ts " [" status "]"
+            if (node != "") {
+                summary = summary " " node
             }
 
-            {
-                ts = $1 " " $2
-                line = $0
-                status = ""
-                node = ""
+            if (color_end != "") {
+                printf "%s%s %s%s\n", color_start, summary, raw, color_end
+            } else {
+                printf "%s %s\n", summary, raw
+            }
 
-                if (match(line, /SUSPECT: ([^ ]+)/, arr)) {
-                    status = "SUSPECT"; node = arr[1]
-                } else if (match(line, /FAILED: ([^ ]+)/, arr)) {
-                    status = "FAILED"; node = arr[1]
-                } else if (match(line, /CLEARED: ([^ ]+)/, arr)) {
-                    status = "CLEARED"; node = arr[1]
-                } else if (match(line, /New member joined: ([^ ]+)/, arr)) {
-                    status = "JOINED"; node = arr[1]
-                } else if (match(line, /left the group: ([^ ]+)/, arr)) {
-                    status = "LEFT"; node = arr[1]
-                } else if (match(line, /Member ([^ ]+) cleared suspicion/, arr)) {
-                    status = "CLEARED"; node = arr[1]
-                } else {
-                    next
+            printf "%s %s\n", summary, raw >> event_file
+            close(event_file)
+        }
+
+        function extract_node(line, pattern,   pos, rest, parts, n) {
+            pos = index(line, pattern)
+            if (pos > 0) {
+                rest = substr(line, pos + length(pattern))
+                n = split(rest, parts, /[[:space:]]+/)
+                if (n > 0) {
+                    return parts[1]
                 }
+            }
+            return ""
+        }
 
-                key = (node != "" ? node : line)
+        {
+            ts = $1 " " $2
+            line = $0
+            status = ""
+            node = ""
 
-                message = substr(line, length($1 " " $2 " ") + 1)
-
-                if (current_state[key] != status || last_line[key] != line) {
-                    current_state[key] = status
-                    last_line[key] = line
-                    emit(ts, status, node, message)
-                    flush_state()
+            if (index(line, "SUSPECT: ") > 0) {
+                status = "SUSPECT"
+                node = extract_node(line, "SUSPECT: ")
+            } else if (index(line, "FAILED: ") > 0) {
+                status = "FAILED"
+                node = extract_node(line, "FAILED: ")
+            } else if (index(line, "CLEARED: ") > 0) {
+                status = "CLEARED"
+                node = extract_node(line, "CLEARED: ")
+            } else if (index(line, "New member joined: ") > 0) {
+                status = "JOINED"
+                node = extract_node(line, "New member joined: ")
+            } else if (index(line, "left the group: ") > 0) {
+                status = "LEFT"
+                node = extract_node(line, "left the group: ")
+            } else if (index(line, "Member ") > 0 && index(line, " cleared suspicion") > 0) {
+                status = "CLEARED"
+                node = extract_node(line, "Member ")
+                if (node != "") {
+                    sub(/ cleared suspicion.*/, "", node)
                 }
-            }'
-    ) &
-    TAIL_PID=$!
-fi
+            } else {
+                next
+            }
 
-# Cleanup function - kills all background processes
-cleanup() {
-    echo ""
-    echo "Cleaning up background processes..."
-    
-    # Kill the tail process and its children
-    if [ -n "$TAIL_PID" ]; then
-        # Kill the entire process group to ensure all pipeline processes are terminated
-        kill -TERM -$TAIL_PID 2>/dev/null || kill $TAIL_PID 2>/dev/null
-        
+            key = (node != "" ? node : line)
+            message = substr(line, length($1 " " $2 " ") + 1)
+
+            if (current_state[key] != status || last_line[key] != line) {
+                current_state[key] = status
+                last_line[key] = line
+                emit(ts, status, node, message)
+                flush_state()
+            }
+        }'
         # Wait a moment for graceful termination
         sleep 0.2
         
@@ -146,11 +165,12 @@ while true; do
 
     case "$cmd" in
         ""|"help")
-            echo "Available commands: list_mem, list_self, display_suspects, display_protocol, join, leave, switch, show_status, show_events, quit"
+            echo "Available commands: list_mem, list_self, display_suspects, display_protocol, join, leave, switch, show_status, show_events, grep_logs, quit"
             echo "Examples:"
             echo "  switch -mode gossip -interval 500ms"
             echo "  switch -mode ping -suspicion -interval 200ms"
             echo "  join 172.22.156.123:8080"
+            echo "  grep_logs (then follow the prompts for your grep command)"
             ;;
         "quit"|"exit"|"q")
             echo "Goodbye!"
@@ -175,6 +195,16 @@ while true; do
             else
                 echo "No events recorded yet."
             fi
+            ;;
+        "grep_logs")
+            read -p "Enter grep command (e.g., grep -E 'SUSPECT|FAILED'): " grep_cmd
+            if [ -z "$grep_cmd" ]; then
+                echo "No grep command provided."
+                continue
+            fi
+            read -p "Log key [default: node]: " log_key
+            log_key=${log_key:-node}
+            ./mp2-node -cmd grep_logs -arg1 "$grep_cmd" -arg2 "$log_key"
             ;;
         *)
             # Forward the command to the actual application

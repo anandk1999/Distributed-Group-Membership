@@ -8,12 +8,17 @@ import (
 	"io"
 	"log"
 	"mp2-g02/detectors"
+	logclient "mp2-g02/logquerier/client"
+	logcommon "mp2-g02/logquerier/common"
+	logserver "mp2-g02/logquerier/server"
 	"mp2-g02/utils"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -303,7 +308,7 @@ func main() {
 		introducerIP  = flag.String("introducer", "", "Introducer IP:Port")
 		isIntroducer  = flag.Bool("is-introducer", false, "Act as introducer")
 		mode          = flag.String("mode", "gossip", "Detection mode: gossip or pingack")
-		cmd           = flag.String("cmd", "", "Client command: list_mem, list_self, join, leave, display_suspects, switch, display_protocol")
+		cmd           = flag.String("cmd", "", "Client command: list_mem, list_self, join, leave, display_suspects, switch, display_protocol, grep_logs")
 		controlPortIn = flag.Int("control-port", 0, "Control server port on localhost (default: port+10000)")
 		arg1          = flag.String("arg1", "", "Optional argument 1 for cmd")
 		arg2          = flag.String("arg2", "", "Optional argument 2 for cmd")
@@ -365,6 +370,39 @@ func main() {
 	if err := controller.Start(); err != nil {
 		log.Fatalf("Failed to start controller: %v", err)
 	}
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Failed to determine working directory: %v", err)
+	}
+
+	logFilePath := filepath.Join(workDir, "node.log")
+	if f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND, 0o644); err != nil {
+		log.Fatalf("Failed to ensure node.log exists: %v", err)
+	} else {
+		_ = f.Close()
+	}
+
+	logSrvCfg := logserver.Config{
+		Addr:             fmt.Sprintf(":%d", logcommon.DefaultPort),
+		LogPaths:         map[string]string{logcommon.DefaultFileType: "node.log"},
+		DefaultFileType:  logcommon.DefaultFileType,
+		WorkingDirectory: workDir,
+	}
+	logSrv, err := logserver.New(logSrvCfg)
+	if err != nil {
+		log.Fatalf("Failed to initialize log querier server: %v", err)
+	}
+	logSrvCtx, logSrvCancel := context.WithCancel(context.Background())
+	defer func() {
+		logSrvCancel()
+		_ = logSrv.Close()
+	}()
+	go func() {
+		if err := logSrv.Serve(logSrvCtx); err != nil {
+			log.Printf("log querier server stopped: %v", err)
+		}
+	}()
 
 	// Start control server (daemon API)
 	ctl := NewControlServer(controller, controlPort)
@@ -524,6 +562,37 @@ func runClient(cmd string, controlPort int, arg1, arg2 string) {
 		endpoint = "/switch?" + url.Values{"mechanism": {arg1}, "suspicion": {arg2}}.Encode()
 	case "display_protocol":
 		endpoint = "/display_protocol"
+	case "grep_logs":
+		if arg1 == "" {
+			log.Fatal("grep_logs requires arg1 to contain the grep command, e.g. \"grep -E 'SUSPECT|FAILED'\"")
+		}
+		fileType := arg2
+		if fileType == "" {
+			fileType = logcommon.DefaultFileType
+		}
+		hostsFile := os.Getenv("MP2_LOG_HOSTS_FILE")
+		if hostsFile == "" {
+			hostsFile = logclient.DefaultHostsFile()
+		}
+		opts := logclient.Options{
+			HostsFile: hostsFile,
+			Port:      logcommon.DefaultPort,
+			Request: logcommon.ServerRequest{
+				Input:    arg1,
+				FileType: fileType,
+			},
+			Output:    os.Stdout,
+			ErrOutput: os.Stderr,
+		}
+		if portEnv := os.Getenv("MP2_LOG_PORT"); portEnv != "" {
+			if p, err := strconv.Atoi(portEnv); err == nil {
+				opts.Port = p
+			}
+		}
+		if err := logclient.Run(context.Background(), opts); err != nil {
+			log.Fatalf("grep_logs failed: %v", err)
+		}
+		return
 	default:
 		log.Fatalf("unknown cmd: %s", cmd)
 	}

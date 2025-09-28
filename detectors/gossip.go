@@ -13,10 +13,11 @@ type GossipManager struct {
 	network         *utils.NetworkLayer
 	suspicionMgr    *utils.SuspicionManager
 	fanout          int
-	stopped         chan bool
+	stopCh          chan struct{}
 	enableSuspicion bool
 	mu              sync.Mutex
 	active          bool
+	wg              sync.WaitGroup
 	// Timeout configuration
 	timeouts utils.TimeoutConfig
 }
@@ -27,9 +28,9 @@ func NewGossipManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspici
 		network:         net,
 		suspicionMgr:    suspicionMgr,
 		fanout:          3, // Send to 3 random nodes
-		stopped:         make(chan bool),
+		stopCh:          make(chan struct{}),
 		enableSuspicion: false,
-		active:          true,
+		active:          false,
 		timeouts:        utils.DefaultTimeoutConfig(),
 	}
 }
@@ -40,14 +41,23 @@ func NewGossipManagerWithTimeouts(ml *utils.MembershipList, net *utils.NetworkLa
 		network:         net,
 		suspicionMgr:    suspicionMgr,
 		fanout:          3,
-		stopped:         make(chan bool),
+		stopCh:          make(chan struct{}),
 		enableSuspicion: false,
-		active:          true,
+		active:          false,
 		timeouts:        timeouts,
 	}
 }
 
 func (g *GossipManager) Start() {
+	g.mu.Lock()
+	if g.active {
+		g.mu.Unlock()
+		return
+	}
+	g.stopCh = make(chan struct{})
+	g.active = true
+	g.mu.Unlock()
+
 	// Register message handlers
 	g.network.RegisterHandler(utils.Heartbeat, g.handleHeartbeat)
 	g.network.RegisterHandler(utils.Suspect, g.handleSuspectMessage)
@@ -58,16 +68,35 @@ func (g *GossipManager) Start() {
 	g.network.RegisterHandler(utils.Leave, g.handleLeave)
 
 	// Start gossip loop
+	g.wg.Add(1)
 	go g.gossipLoop()
 
 	// Start failure detection loop
+	g.wg.Add(1)
 	go g.failureDetectionLoop()
 
 	log.Println("Gossip manager started")
 }
 
 func (g *GossipManager) Stop() {
-	close(g.stopped)
+	g.mu.Lock()
+	if !g.active {
+		g.mu.Unlock()
+		return
+	}
+	ch := g.stopCh
+	g.active = false
+	g.mu.Unlock()
+
+	if ch != nil {
+		close(ch)
+	}
+
+	g.wg.Wait()
+
+	g.mu.Lock()
+	g.stopCh = nil
+	g.mu.Unlock()
 }
 
 func (g *GossipManager) SetSuspicion(enable bool) {
@@ -79,12 +108,13 @@ func (g *GossipManager) SuspicionEnabled() bool {
 }
 
 func (g *GossipManager) gossipLoop() {
+	defer g.wg.Done()
 	ticker := time.NewTicker(g.timeouts.GossipPeriod)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-g.stopped:
+		case <-g.stopCh:
 			return
 		case <-ticker.C:
 			g.performGossipRound()
@@ -97,6 +127,26 @@ func (g *GossipManager) performGossipRound() {
 	targets := g.membership.GetRandomMembers(g.fanout, []string{g.membership.LocalNode.String()})
 	if len(targets) == 0 {
 		return
+	}
+
+	g.membership.RLock()
+	localSnapshot := cloneGossipMember(g.membership.Members[g.membership.LocalNode.String()])
+	g.membership.RUnlock()
+	if localSnapshot != nil {
+		g.membership.AddRecentUpdateSafe(localSnapshot)
+	}
+
+	for _, target := range targets {
+		if snapshot := cloneGossipMember(target); snapshot != nil {
+			g.membership.AddRecentUpdateSafe(snapshot)
+		}
+	}
+
+	extraPeers := g.membership.GetRandomMembers(2, []string{g.membership.LocalNode.String()})
+	for _, peer := range extraPeers {
+		if snapshot := cloneGossipMember(peer); snapshot != nil {
+			g.membership.AddRecentUpdateSafe(snapshot)
+		}
 	}
 
 	// Get recent membership updates to piggyback
@@ -122,12 +172,13 @@ func (g *GossipManager) performGossipRound() {
 }
 
 func (g *GossipManager) failureDetectionLoop() {
+	defer g.wg.Done()
 	ticker := time.NewTicker(g.timeouts.CheckInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-g.stopped:
+		case <-g.stopCh:
 			return
 		case <-ticker.C:
 			g.checkFailures()
@@ -137,71 +188,64 @@ func (g *GossipManager) failureDetectionLoop() {
 
 func (g *GossipManager) checkFailures() {
 	now := time.Now()
-	var toRemove []*utils.Member
-	var toSuspect []string
-	var failureUpdates []*utils.Member
+	suspectThreshold := g.timeouts.FailureTimeout
+	if suspectThreshold <= 0 {
+		suspectThreshold = 3 * time.Second
+	}
+
+	confirmThreshold := suspectThreshold + g.timeouts.CleanupTimeout
+	if confirmThreshold <= suspectThreshold {
+		confirmThreshold = suspectThreshold + time.Second
+	}
+
+	var suspectUpdates []*utils.Member
+	var removalCandidates []*utils.Member
 
 	g.membership.Lock()
-	// First pass - collect all changes without modifying the map
 	for id, member := range g.membership.Members {
-		// Skip self
 		if id == g.membership.LocalNode.String() {
 			continue
 		}
 
 		switch member.Status {
 		case utils.Alive:
-			if now.Sub(member.LastHeartbeat) > g.timeouts.SuspicionTimeout {
+			if suspectThreshold > 0 && now.Sub(member.LastHeartbeat) >= suspectThreshold {
 				if g.enableSuspicion {
 					member.Status = utils.Suspected
 					member.SuspicionStart = now
-					toSuspect = append(toSuspect, cloneGossipMember(member).ID.String())
+					suspectUpdates = append(suspectUpdates, cloneGossipMember(member))
 				} else {
-					// Direct failure without suspicion
-					toRemove = append(toRemove, cloneGossipMember(member))
-					failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
-					failureUpdates = append(failureUpdates, failedUpdate)
-					log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
+					removalCandidates = append(removalCandidates, cloneGossipMember(member))
 				}
 			}
 		case utils.Suspected:
-			if now.Sub(member.SuspicionStart) > g.timeouts.FailureTimeout {
-				toRemove = append(toRemove, cloneGossipMember(member))
-				failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
-				failureUpdates = append(failureUpdates, failedUpdate)
-				log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
+			if now.Sub(member.SuspicionStart) >= confirmThreshold {
+				removalCandidates = append(removalCandidates, cloneGossipMember(member))
+			}
+		case utils.Failed:
+			if g.timeouts.CleanupTimeout > 0 && now.Sub(member.LastHeartbeat) >= g.timeouts.CleanupTimeout {
+				removalCandidates = append(removalCandidates, cloneGossipMember(member))
 			}
 		}
 	}
 
-	// Second pass - apply all changes atomically (collect updates to add outside lock)
-	var suspectedMembers []*utils.Member
-	for _, id := range toSuspect {
-		if member, exists := g.membership.Members[id]; exists {
-			member.Status = utils.Suspected
-			member.SuspicionStart = now
-			suspectedMembers = append(suspectedMembers, member)
+	for _, member := range removalCandidates {
+		delete(g.membership.Members, member.ID.String())
+	}
+	g.membership.Unlock()
+
+	for _, member := range suspectUpdates {
+		g.membership.AddRecentUpdateSafe(member)
+		if g.enableSuspicion {
+			g.suspicionMgr.ProcessSuspicion(g.membership.LocalNode, member.ID, member.Incarnation)
 		}
 	}
 
-	for _, member := range toRemove {
-		delete(g.membership.Members, member.ID.String())
-	}
-
-	g.membership.Unlock()
-
-	// Add updates outside the lock to avoid deadlock
-	for _, member := range suspectedMembers {
-		g.membership.AddRecentUpdateSafe(member)
-	}
-
-	for _, update := range failureUpdates {
-		g.membership.AddRecentUpdateSafe(update)
-	}
-
-	// Log removed members
-	for _, m := range toRemove {
-		log.Printf("GOSSIP: Removed failed member %s", m.ID)
+	for _, member := range removalCandidates {
+		elapsed := now.Sub(member.LastHeartbeat)
+		failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation, LastHeartbeat: now}
+		g.membership.AddRecentUpdateSafe(failedUpdate)
+		log.Printf("GOSSIP: Removed member %s after %.2fs without heartbeat", member.ID, elapsed.Seconds())
 	}
 }
 
