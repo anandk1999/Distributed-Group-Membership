@@ -1,5 +1,5 @@
 #!/bin/bash
-# Live monitoring script - shows SUSPECT events and allows CLI commands
+# Clean monitoring script - minimal output, focus on commands
 # Usage: ./scripts/monitor_node.sh [host] [port]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,58 +8,25 @@ REMOTE_USER="${REMOTE_USER:-saik2}"
 HOST=${1:-$(hostname)}
 PORT=${2:-8080}
 
-# Local monitoring
-echo "Monitoring local node on port $PORT"
-echo "Commands: list_mem, list_self, display_suspects, display_protocol, join, leave, switch, quit"
-echo "You can add arguments after a command, e.g.: switch -mode gossip -interval 500ms"
-echo "Membership events (SUSPECT/FAILED/CLEARED/joins/leaves) will appear automatically below:"
-echo "Note: Exact duplicate lines (including timestamp) are filtered out"
-echo "----------------------------------------"
+# Create status tracking
+STATUS_FILE="/tmp/mp2_status_$$"
+trap "rm -f $STATUS_FILE" EXIT
 
-# Start background process to show suspects from log
+echo "=== MP2 Node Controller (Clean Mode) ==="
+echo "Port: $PORT | Commands: list_mem, list_self, display_suspects, display_protocol"
+echo "         join <addr>, leave, switch <options>, summary, quiet, verbose, quit"
+echo "========================================================================="
+
+# Background process to track membership changes (silent)
 if [ -f "node.log" ]; then
-    # Show only the latest SUSPECT, FAILED, CLEARED events and member joins/leaves
-    # Use bash subshell for better process control on macOS
     (
         tail -F node.log 2>/dev/null | \
-            grep --line-buffered -E "(SUSPECT|FAILED|CLEARED|joined|left|New member)" | \
-            awk '
-            {
-                # Extract timestamp (first 3 fields: 2025/09/27 18:54:28)
-                timestamp = $1 " " $2
-                
-                # Extract event type
-                if ($0 ~ /SUSPECT:/) event_type = "SUSPECT"
-                else if ($0 ~ /FAILED:/) event_type = "FAILED"
-                else if ($0 ~ /CLEARED:/) event_type = "CLEARED"
-                else if ($0 ~ /joined/) event_type = "JOINED"
-                else if ($0 ~ /left/) event_type = "LEFT"
-                else if ($0 ~ /New member/) event_type = "NEW_MEMBER"
-                else event_type = "OTHER"
-                
-                # Store the latest entry for each event type
-                if (timestamp >= latest_time[event_type] || latest_time[event_type] == "") {
-                    if (timestamp > latest_time[event_type]) {
-                        # New timestamp - clear old entries and show this one
-                        latest_time[event_type] = timestamp
-                        latest_line[event_type] = $0
-                        print $0
-                    } else if (timestamp == latest_time[event_type] && latest_line[event_type] != $0) {
-                        # Same timestamp but different line - show it
-                        latest_line[event_type] = $0
-                        print $0
-                    }
-                }
-                
-                # Cleanup old entries periodically
-                if (NR % 100 == 0) {
-                    for (t in latest_time) {
-                        if (latest_time[t] < timestamp) {
-                            # Keep only recent entries
-                        }
-                    }
-                }
-            }'
+            grep --line-buffered -E "(joined|left|New member)" | \
+            while IFS= read -r line; do
+                echo "$(date '+%H:%M:%S') $line" >> "$STATUS_FILE"
+                # Keep only last 10 lines
+                tail -10 "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+            done
     ) &
     TAIL_PID=$!
 fi
