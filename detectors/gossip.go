@@ -144,31 +144,32 @@ func (g *GossipManager) checkFailures() {
 	g.membership.Lock()
 	// First pass - collect all changes without modifying the map
 	for id, member := range g.membership.Members {
+		// Skip self
 		if id == g.membership.LocalNode.String() {
 			continue
 		}
 
-		// Check if member hasn't been heard from in failureTimeout
-		if !g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.timeouts.FailureTimeout+g.timeouts.CleanupTimeout {
-			// No suspicion - mark as failed immediately
-			toRemove = append(toRemove, cloneGossipMember(member))
-			failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
-			failureUpdates = append(failureUpdates, failedUpdate)
-			log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
-		}
-		if g.enableSuspicion && now.Sub(member.LastHeartbeat) > g.timeouts.FailureTimeout {
-			if member.Status == utils.Alive {
-				// First time detecting failure - mark as suspected
-				toSuspect = append(toSuspect, id)
-				// Note: OnSuspect callback will handle the logging to avoid duplication
-			} else if member.Status == utils.Suspected {
-				// Already suspected, check if we should confirm failure
-				if now.Sub(member.SuspicionStart) > g.suspicionMgr.GetTimeout() {
+		switch member.Status {
+		case utils.Alive:
+			if now.Sub(member.LastHeartbeat) > g.timeouts.SuspicionTimeout {
+				if g.enableSuspicion {
+					member.Status = utils.Suspected
+					member.SuspicionStart = now
+					toSuspect = append(toSuspect, cloneGossipMember(member).ID.String())
+				} else {
+					// Direct failure without suspicion
 					toRemove = append(toRemove, cloneGossipMember(member))
 					failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
 					failureUpdates = append(failureUpdates, failedUpdate)
-					// Note: OnConfirm callback will handle the logging to avoid duplication
+					log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
 				}
+			}
+		case utils.Suspected:
+			if now.Sub(member.SuspicionStart) > g.timeouts.FailureTimeout {
+				toRemove = append(toRemove, cloneGossipMember(member))
+				failedUpdate := &utils.Member{ID: member.ID, Status: utils.Failed, Incarnation: member.Incarnation}
+				failureUpdates = append(failureUpdates, failedUpdate)
+				log.Printf("GOSSIP: Declared %s as FAILED (no heartbeat for %v)", member.ID, now.Sub(member.LastHeartbeat))
 			}
 		}
 	}
