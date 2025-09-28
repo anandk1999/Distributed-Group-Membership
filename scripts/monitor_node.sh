@@ -19,21 +19,43 @@ echo "----------------------------------------"
 # Start background process to show suspects from log
 if [ -f "node.log" ]; then
     # Show SUSPECT, FAILED, CLEARED events and member joins/leaves (deduplicated)
-    tail -F node.log 2>/dev/null | \
-        grep --line-buffered -E "(SUSPECT|FAILED|CLEARED|joined|left|New member)" | \
-        awk '!seen[$0]++ {print $0; if(length(seen) > 1000) {delete seen}}' &
+    # Start the pipeline in a new process group to make cleanup easier
+    setsid bash -c '
+        tail -F node.log 2>/dev/null | \
+            grep --line-buffered -E "(SUSPECT|FAILED|CLEARED|joined|left|New member)" | \
+            awk "!seen[\$0]++ {print \$0; if(length(seen) > 1000) {delete seen}}"
+    ' &
     TAIL_PID=$!
 fi
 
-# Cleanup function
+# Cleanup function - kills all background processes
 cleanup() {
+    echo ""
+    echo "Cleaning up background processes..."
+    
+    # Kill the tail process and its children
     if [ -n "$TAIL_PID" ]; then
-        kill $TAIL_PID 2>/dev/null
+        # Kill the entire process group to ensure all pipeline processes are terminated
+        kill -TERM -$TAIL_PID 2>/dev/null || kill $TAIL_PID 2>/dev/null
+        
+        # Wait a moment for graceful termination
+        sleep 0.2
+        
+        # Force kill if still running
+        kill -KILL -$TAIL_PID 2>/dev/null || kill -KILL $TAIL_PID 2>/dev/null
     fi
+    
+    # Kill any remaining background jobs from this shell
+    jobs -p | xargs -r kill -TERM 2>/dev/null
+    sleep 0.1
+    jobs -p | xargs -r kill -KILL 2>/dev/null
+    
+    echo "Cleanup complete."
     exit 0
 }
 
-trap cleanup INT TERM EXIT
+# Set up signal traps for cleanup
+trap cleanup INT TERM EXIT QUIT
 
 # Interactive CLI loop
 while true; do
@@ -57,9 +79,9 @@ while true; do
             echo "  switch -mode ping -suspicion -interval 200ms"
             echo "  join 172.22.156.123:8080"
             ;;
-        "quit"|"exit")
+        "quit"|"exit"|"q")
             echo "Goodbye!"
-            break
+            cleanup
             ;;
         *)
             # Forward the command to the actual application
