@@ -31,7 +31,7 @@ func NewGossipManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspici
 		stopCh:          make(chan struct{}),
 		enableSuspicion: false,
 		active:          false,
-		timeouts:        utils.DefaultTimeoutConfig(),
+		timeouts:        utils.OptimalTimeoutConfig(),
 	}
 }
 
