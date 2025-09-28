@@ -51,7 +51,7 @@ func NewPingAckManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspic
 	return &PingAckManager{
 		membership:      ml,
 		network:         net,
-		k:               5,
+		k:               3, // Optimal k=3 for most network sizes
 		stopped:         make(chan bool),
 		suspicionMgr:    suspicionMgr,
 		seqNum:          0,
@@ -61,7 +61,7 @@ func NewPingAckManager(ml *utils.MembershipList, net *utils.NetworkLayer, suspic
 		active:          true,
 		ctx:             ctx,
 		cancel:          cancel,
-		timeouts:        utils.DefaultTimeoutConfig(),
+		timeouts:        utils.OptimalTimeoutConfig(), // Use optimal config by default
 	}
 }
 
@@ -70,7 +70,7 @@ func NewPingAckManagerWithTimeouts(ml *utils.MembershipList, net *utils.NetworkL
 	return &PingAckManager{
 		membership:      ml,
 		network:         net,
-		k:               5,
+		k:               3, // Optimal k=3 for most network sizes
 		stopped:         make(chan bool),
 		suspicionMgr:    suspicionMgr,
 		seqNum:          0,

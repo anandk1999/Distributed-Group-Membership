@@ -140,10 +140,25 @@ func DefaultTimeoutConfig() TimeoutConfig {
 		SuspicionTimeout: 2 * time.Second, // Time to confirm suspicions
 
 		GossipPeriod:   1 * time.Second,        // Gossip every second
-		ProtocolPeriod: 2 * time.Second,        // SWIM period
-		AckTimeout:     500 * time.Millisecond, // Quick ACK timeout
+		ProtocolPeriod: 1 * time.Second,        // SWIM period
+		AckTimeout:     250 * time.Millisecond, // Quick ACK timeout
 
 		CheckInterval: 200 * time.Millisecond, // Frequent checks
+	}
+}
+
+// OptimalTimeoutConfig returns optimized parameters for fast convergence
+func OptimalTimeoutConfig() TimeoutConfig {
+	return TimeoutConfig{
+		FailureTimeout:   2 * time.Second,         // Faster failure detection
+		CleanupTimeout:   1 * time.Second,         // Quicker cleanup
+		SuspicionTimeout: 1500 * time.Millisecond, // Balanced suspicion time
+
+		GossipPeriod:   500 * time.Millisecond, // More frequent gossip
+		ProtocolPeriod: 500 * time.Millisecond, // Faster SWIM cycles
+		AckTimeout:     150 * time.Millisecond, // Quicker ACK timeout
+
+		CheckInterval: 100 * time.Millisecond, // More frequent checks
 	}
 }
 
